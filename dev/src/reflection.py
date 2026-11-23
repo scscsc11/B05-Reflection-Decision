@@ -569,6 +569,8 @@ def run(
                 ]
                 if blind:
                     signature_inputs.extend(["blind-v1", meta.get("initial_fingerprint")])
+                if db is not None:
+                    signature_inputs.append(experience_store.PROVENANCE_SCHEMA)
                 if review_rounds and any(case["id"] not in answers for case in cases):
                     # A one-round checkpoint cannot be mixed with results from the vote policy.
                     signature_inputs.extend([BLIND_REVIEW_POLICY, BLIND_REVIEW])
@@ -633,7 +635,14 @@ def run(
                             "case_label": evidence["label"], **evidence["knowledge"],
                             "expected_label": expected, "status": status, "source": source,
                         }
-                        update = {"action": "not_saved"} if blind else stage_knowledge(known, case_id, entry)
+                        if blind:
+                            update = {"action": "not_saved"}
+                        else:
+                            entry["provenance"] = {
+                                "initial_label": draft["label"], "source_round": evidence["round"],
+                                "selected_round": review["selected_round"], "final_label": review["label"],
+                            }
+                            update = stage_knowledge(known, case_id, entry)
                         knowledge = entry | update
                         knowledge_round, action = evidence["round"], update["action"]
                     review_record = {

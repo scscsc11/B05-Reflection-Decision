@@ -1,5 +1,6 @@
 """Exercise evidence filtering, version history, and compatibility with older knowledge."""
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -72,6 +73,81 @@ class KnowledgeTests(unittest.TestCase):
                 db, "scope", "course-materials", ["login-works", "download-failure"], "a"
             )
             self.assertEqual(hits, [])
+
+    def test_provenance_is_preserved_per_revision(self):
+        first = {
+            "initial_label": "account", "source_round": 1, "selected_round": 1, "final_label": "materials",
+        }
+        second = first | {"source_round": 2, "selected_round": 2}
+        with closing(knowledge.open_store(self.path)) as db, db:
+            self.assertEqual(knowledge.save_lesson(db, "scope", "a", entry() | {"provenance": first})["revision"], 1)
+            update = knowledge.save_lesson(db, "scope", "a", entry() | {"provenance": second})
+            self.assertEqual((update["action"], update["revision"]), ("updated", 2))
+            repeated = knowledge.save_lesson(db, "scope", "a", entry() | {"provenance": second})
+            self.assertEqual((repeated["action"], repeated["revision"]), ("unchanged", 2))
+            without_provenance = knowledge.save_lesson(db, "scope", "a", entry())
+            self.assertEqual((without_provenance["action"], without_provenance["revision"]), ("unchanged", 2))
+
+        with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            history = db.execute("SELECT revision, provenance FROM knowledge_versions ORDER BY revision")
+            self.assertEqual([(row["revision"], json.loads(row["provenance"])) for row in history],
+                             [(1, first), (2, second)])
+            latest = knowledge.latest_lessons(db, "scope")
+            self.assertEqual(latest, [{"case_id": "a", "revision": 2, **entry(), "provenance": second}])
+            hits, _ = knowledge.retrieve_lessons(db, "scope", "course-materials", entry()["conditions"], "b")
+            self.assertEqual([hit["revision"] for hit in hits], [2])
+            self.assertNotIn("provenance", hits[0])
+
+    def test_provenance_must_match_the_selected_decision(self):
+        record = entry() | {"provenance": {
+            "initial_label": "account", "source_round": 1, "selected_round": 0, "final_label": "materials",
+        }}
+        with self.assertRaisesRegex(ValueError, "conflicts with the selected decision"):
+            knowledge.plan_lesson(None, record)
+        record["provenance"] |= {"selected_round": 1, "final_label": "schedule"}
+        with self.assertRaisesRegex(ValueError, "conflicts with the selected decision"):
+            knowledge.plan_lesson(None, record)
+
+    def test_previous_schema_read_only_and_writable_compatibility(self):
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.executescript("""
+                CREATE TABLE knowledge_versions (
+                    scope TEXT NOT NULL, case_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                    task TEXT NOT NULL, domain TEXT NOT NULL, topic TEXT NOT NULL, conditions TEXT NOT NULL,
+                    case_label TEXT NOT NULL, problem TEXT NOT NULL, lesson TEXT NOT NULL,
+                    applies_when TEXT NOT NULL, status TEXT NOT NULL, expected_label TEXT,
+                    source TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY (scope, case_id, revision)
+                );
+                INSERT INTO knowledge_versions VALUES (
+                    'scope', 'a', 1, 'support-tickets', 'campus-support-demo', 'course-materials',
+                    '["download-failure", "login-works"]', 'materials', 'Download fails',
+                    'Use the primary symptom.', 'The session already works.', 'verified',
+                    'materials', 'simulated_gateway', '2026-11-20'
+                );
+            """)
+        original = self.path.read_bytes()
+        previous = [{"case_id": "a", "revision": 1, **entry()}]
+        with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            self.assertEqual(knowledge.latest_lessons(db, "scope"), previous)
+        self.assertEqual(self.path.read_bytes(), original)
+
+        provenance = {
+            "initial_label": "account", "source_round": 1, "selected_round": 1, "final_label": "materials",
+        }
+        with closing(knowledge.open_store(self.path)) as db, db:
+            self.assertEqual(knowledge.latest_lessons(db, "scope"), previous)
+            update = knowledge.save_lesson(db, "scope", "a", entry() | {"provenance": provenance})
+            self.assertEqual((update["action"], update["revision"]), ("updated", 2))
+            history = db.execute("SELECT revision, provenance FROM knowledge_versions ORDER BY revision")
+            self.assertEqual([(row["revision"], row["provenance"] is None) for row in history],
+                             [(1, True), (2, False)])
+
+        with closing(knowledge.open_store(self.path)) as db:
+            self.assertEqual(knowledge.latest_lessons(db, "scope"),
+                             [{"case_id": "a", "revision": 2, **entry(), "provenance": provenance}])
 
     def test_legacy_rows_are_imported_once_as_unverified(self):
         with closing(sqlite3.connect(self.path)) as db, db:

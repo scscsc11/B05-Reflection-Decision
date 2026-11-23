@@ -125,6 +125,7 @@ class TeamIntegrationTests(unittest.TestCase):
                 self.assertTrue(all(attempt["correct"] is None for attempt in row["rounds"]))
                 sent = [call["prior_lessons"] for call in requests[arm] if call["case"]["id"] == row["id"]]
                 self.assertEqual(sent, [row["sent_lessons"]] * row["review_rounds"])
+                self.assertTrue(all("provenance" not in lesson for lesson in row["sent_lessons"]))
                 self.assertEqual(row["model_calls"], len(sent))
 
         fix, broken, tie = trial["without_history"]["cases"]
@@ -191,6 +192,34 @@ class TeamIntegrationTests(unittest.TestCase):
         result = scene_io.read_json(output)
         self.assertEqual(result.pop("reference_sha256"), digest)
         self.assertEqual(result, scene_io.read_json(paths["score"]))
+
+    def test_seed_resume_preserves_accepted_and_rejected_review_sources(self):
+        run_blind_trial(self.work)
+        inputs = self.work / "seed_input"
+        output = self.work / "resumed_seed"
+        db_path = self.work / "resumed_seed.sqlite3"
+        checkpoint = self.work / "seed_checkpoint.json"
+        options = {"review_rounds": 2, "use_history": False, "checkpoint": checkpoint}
+        interrupted = ScriptedModel(["A", "B", reflection.ModelError("seed interruption")])
+        with self.assertRaisesRegex(reflection.ModelError, "seed interruption"):
+            reflection.run(inputs, output, db_path, in_process_model=interrupted, **options)
+        self.assertFalse(output.exists())
+        records = scene_io.read_json(checkpoint)["records"]
+        self.assertEqual(len(records), 1)
+        accepted = {"initial_label": "A", "source_round": 1, "selected_round": 1, "final_label": "B"}
+        self.assertEqual(records[0]["review"]["knowledge"]["provenance"], accepted)
+
+        resumed = ScriptedModel(["A", "C"])
+        reflection.run(inputs, output, db_path, in_process_model=resumed, **options)
+        self.assertEqual([data["case"]["id"] for _, data in resumed.requests], ["seed-account", "seed-account"])
+        domain, labels, _ = reflection.load_benchmark(inputs / "benchmark.json")
+        scope = reflection.fingerprint([reflection.TASK, domain, labels, "in_process_stub"])
+        lessons = {row["case_id"]: row for row in reflection.blind_seed(db_path, scope, {"heldout"})}
+        self.assertEqual(lessons["seed-materials"]["provenance"], accepted)
+        rejected = lessons["seed-account"]
+        self.assertEqual(rejected["provenance"],
+                         {"initial_label": "A", "source_round": 1, "selected_round": 0, "final_label": "A"})
+        self.assertEqual((rejected["case_label"], rejected["status"]), ("C", "rejected"))
 
     def test_resume_keeps_completed_blind_rounds(self):
         paths = run_blind_trial(self.work)
