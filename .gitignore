@@ -49,7 +49,6 @@ output/
 /data/selftest/
 /baselines/
 /Dockerfile
-/README.md
 /requirements.txt
 /run.sh
 /src/
