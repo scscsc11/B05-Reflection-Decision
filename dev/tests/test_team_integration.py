@@ -4,7 +4,9 @@ import hashlib
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from copy import deepcopy
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -159,6 +161,36 @@ class TeamIntegrationTests(unittest.TestCase):
         older = {key: value for key, value in cold.items() if key != "blind_review_policy"}
         with self.assertRaisesRegex(ValueError, "same blind review protocol"):
             score_benchmark.score(trial["initial"], older, trial["with_history"], trial["answers"])
+
+    def test_offline_cli_reads_frozen_answers_after_all_arm_files(self):
+        paths = run_blind_trial(self.work)
+        output = self.work / "verified_score.json"
+        base = [
+            "--initial", str(paths["initial"]), "--without-history", str(paths["without_history"]),
+            "--with-history", str(paths["with_history"]), "--answers", str(paths["answers"]),
+            "--output", str(output),
+        ]
+        missing = self.work / "missing_guarded.json"
+        with patch.object(scene_io, "read_json", wraps=scene_io.read_json) as reader, redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                score_benchmark.main([*base, "--guarded", str(missing)])
+        self.assertEqual(error.exception.code, 1)
+        self.assertNotIn(paths["answers"], [call.args[0] for call in reader.call_args_list])
+        self.assertFalse(output.exists())
+
+        guarded = [*base, "--guarded", str(paths["guarded"]), "--answers-sha256"]
+        with redirect_stderr(StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as error:
+                score_benchmark.main([*guarded, "0" * 64])
+        self.assertEqual(error.exception.code, 1)
+        self.assertIn("SHA-256 does not match", stderr.getvalue())
+        self.assertFalse(output.exists())
+
+        digest = hashlib.sha256(paths["answers"].read_bytes()).hexdigest()
+        self.assertEqual(score_benchmark.main([*guarded, digest]), 0)
+        result = scene_io.read_json(output)
+        self.assertEqual(result.pop("reference_sha256"), digest)
+        self.assertEqual(result, scene_io.read_json(paths["score"]))
 
     def test_resume_keeps_completed_blind_rounds(self):
         paths = run_blind_trial(self.work)

@@ -200,16 +200,18 @@ def main(argv=None) -> int:
     parser.add_argument("--with-history", type=Path, required=True)
     parser.add_argument("--guarded", type=Path, help="additional blind review with the verified-history guard")
     parser.add_argument("--answers", type=Path, required=True)
+    parser.add_argument("--answers-sha256", help="expected SHA-256 of the frozen reference file")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
-        result = score(
-            read_arm(args.initial, "norethink"),
-            read_arm(args.without_history, "rethink"),
-            read_arm(args.with_history, "rethink"),
-            scene_io.read_json(args.answers),
-            guarded=read_arm(args.guarded, "rethink") if args.guarded is not None else None,
-        )
+        initial = read_arm(args.initial, "norethink")
+        without_history = read_arm(args.without_history, "rethink")
+        with_history = read_arm(args.with_history, "rethink")
+        guarded = read_arm(args.guarded, "rethink") if args.guarded is not None else None
+        answers = scene_io.read_json(args.answers, expected_sha256=args.answers_sha256)
+        result = score(initial, without_history, with_history, answers, guarded=guarded)
+        if args.answers_sha256 is not None:
+            result["reference_sha256"] = args.answers_sha256
         text = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         if args.output is not None:
             with args.output.open("x", encoding="utf-8") as stream:

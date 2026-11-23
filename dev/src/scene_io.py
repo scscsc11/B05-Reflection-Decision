@@ -1,5 +1,6 @@
 """Read and validate B05 scenes, and publish complete result files."""
 
+import hashlib
 import json
 import math
 import re
@@ -35,13 +36,14 @@ def unique_object(pairs):
     return obj
 
 
-def read_json(path):
-    """Read a UTF-8 JSON file with unambiguous object keys."""
+def read_json(path, *, expected_sha256: str | None = None):
+    """Read unambiguous UTF-8 JSON and optionally verify the bytes being parsed."""
+    raw = path.read_bytes() if expected_sha256 is not None else None
+    if raw is not None and hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise ValueError(f"{path}: SHA-256 does not match the frozen input.")
     try:
-        with path.open(encoding="utf-8") as stream:
-            return json.load(
-                stream, parse_constant=reject_json_constant, object_pairs_hook=unique_object
-            )
+        text = raw.decode("utf-8") if raw is not None else path.read_text(encoding="utf-8")
+        return json.loads(text, parse_constant=reject_json_constant, object_pairs_hook=unique_object)
     except (ValueError, RecursionError) as exc:
         raise ValueError(f"{path}: invalid JSON ({exc})") from exc
 
