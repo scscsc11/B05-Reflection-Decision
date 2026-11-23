@@ -1,0 +1,81 @@
+{
+  "domain": "campus-support-r2-synthetic",
+  "labels": {
+    "account": "账户登录、身份验证和账户权限",
+    "materials": "课程资料、课件和课程阅读文件",
+    "schedule": "上课时间、教室和排课通知",
+    "other": "不属于上述类别的校园服务问题"
+  },
+  "cases": [
+    {
+      "id": "r2-1b871f313273",
+      "topic": "studio-session-board",
+      "text": "周末陶艺课在班级画板上出现两条开课通知，时段分别是上午和下午。两个入口我都能打开，请确认我所在小组该在什么时候到场。",
+      "features": [
+        "board-link",
+        "lesson-group"
+      ]
+    },
+    {
+      "id": "r2-2b1bdb8ebece",
+      "topic": "design-workshop",
+      "text": "工作坊的组员都能进入互评区，我的个人账户却被标成旁听，连提交按钮也不可用。请核实课程身份并恢复互评权限。",
+      "features": [
+        "peers-unaffected"
+      ]
+    },
+    {
+      "id": "r2-3ed342a68fe8",
+      "topic": "design-workshop",
+      "text": "设计工作坊的课件里，色卡在网页和手机端都显示成空白。能发一份把色卡转成图片的课件吗？",
+      "features": [
+        "both-clients"
+      ]
+    },
+    {
+      "id": "r2-698d1ddb32c1",
+      "topic": "morning-class",
+      "text": "本学期晨课还没开讲，老师说第一节暂停一次，但旧提醒还显示当天上课。能确认首节课是否取消吗？",
+      "features": [
+        "before-first-session",
+        "stale-notice"
+      ]
+    },
+    {
+      "id": "r2-81f1a72e09fd",
+      "topic": "practice-signup",
+      "text": "我上周刚选进实验练习课，同组同学都能把助教分配的实验记录交上去。我登录后却显示仅有查看权限，请帮我开通提交权限。",
+      "features": [
+        "newly-enrolled",
+        "peers-unaffected"
+      ]
+    },
+    {
+      "id": "r2-a33d739f2b30",
+      "topic": "night-study",
+      "text": "我晚上七点在校内上自习，饮水机上的故障灯亮着，按键也不出水。能请后勤来检查吗？",
+      "features": [
+        "after-1800",
+        "on-campus"
+      ]
+    },
+    {
+      "id": "r2-b1a9365e06b9",
+      "topic": "field-practice",
+      "text": "老师在野外实践课程页发了改版测量任务单。新版与上一版对同一个数据栏的单位要求不同。想确认哪张表是本次要用的版本。",
+      "features": [
+        "instructor-posted",
+        "revised-document"
+      ]
+    },
+    {
+      "id": "r2-e7ae2560a456",
+      "topic": "studio-session-board",
+      "text": "手工课换组后，从班级画板能点进艺术工坊页面，但页面提示我的账号不属于新小组。老师已确认上课时段，请把新小组的查看权限加到我的学号下。",
+      "features": [
+        "board-link",
+        "lesson-group"
+      ]
+    }
+  ]
+}

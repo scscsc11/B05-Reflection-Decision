@@ -1,0 +1,228 @@
+{
+  "domain": "campus-support-r2-synthetic",
+  "labels": {
+    "account": "账户登录、身份验证和账户权限",
+    "materials": "课程资料、课件和课程阅读文件",
+    "schedule": "上课时间、教室和排课通知",
+    "other": "不属于上述类别的校园服务问题"
+  },
+  "cases": [
+    {
+      "id": "r2-13e86ddef3c2",
+      "topic": "studio-session-board",
+      "text": "报名版画课后我收到入组口令，页面却提示该口令只对助教身份开放。我是已录取学员，请给我的学生账号开通学员小组权限。",
+      "features": [
+        "invitation-token",
+        "lesson-group"
+      ]
+    },
+    {
+      "id": "r2-196aaff44267",
+      "topic": "library-services",
+      "text": "我用自助还书机还了一本课外小说，屏幕显示已归还，账单却还挂着逾期费。请帮我复查借还记录和收费。",
+      "features": [
+        "charge-disputed",
+        "returned-item"
+      ]
+    },
+    {
+      "id": "r2-1a6cc3483b33",
+      "topic": "exhibit-workshop",
+      "text": "布展实训课程表和报名均已确认。课程文件夹里的灯光布置示例被传成了空文件，请老师重新发一下可打开的图示。",
+      "features": [
+        "empty-file",
+        "registration-confirmed"
+      ]
+    },
+    {
+      "id": "r2-27a3820e80f5",
+      "topic": "field-practice",
+      "text": "老师在野外实践课程页上传了新版等高线练习，印出来才发现右半页被裁掉。课程集合点已确认，请提供能完整打印的练习原版。",
+      "features": [
+        "cutoff-page",
+        "instructor-posted",
+        "revised-document"
+      ]
+    },
+    {
+      "id": "r2-2be1985b34c8",
+      "topic": "design-workshop",
+      "text": "周作业配套的示例有一页在我这儿是乱码，浏览器和手机端都一样，同桌的预览却正常。我想借这套示例的可编辑原稿核对该页文字。",
+      "features": [
+        "both-clients",
+        "peers-unaffected"
+      ]
+    },
+    {
+      "id": "r2-2c39630f3523",
+      "topic": "writing-class",
+      "text": "写作课讲评时投影了一页带标注的引文示例，课后资料夹里只有空白练习。想领一份投影里的标注示例。",
+      "features": [
+        "practice-followup",
+        "shown-in-class"
+      ]
+    },
+    {
+      "id": "r2-493255b4787d",
+      "topic": "ensemble-class",
+      "text": "电子琴合奏课这学期隔周上课。我得提前买回校的车票，能把剩下几次实际开课的日期发给我吗？",
+      "features": [
+        "advance-planning",
+        "alternating-weeks"
+      ]
+    },
+    {
+      "id": "r2-4fc96133e3bb",
+      "topic": "campus-facilities",
+      "text": "晚上的课已经改到隔壁楼，旧教室走廊的饮水机底下还在漏水，地面很滑。请派人检查饮水机。",
+      "features": [
+        "leak",
+        "relocation-notice"
+      ]
+    },
+    {
+      "id": "r2-56b51fafb71c",
+      "topic": "morning-class",
+      "text": "首节晨课明天开始，时间已经确认。我换手机后校园通行认证还绑在旧设备上，能帮我解除旧绑定吗？",
+      "features": [
+        "before-first-session",
+        "device-replaced"
+      ]
+    },
+    {
+      "id": "r2-64856f0d973f",
+      "topic": "night-study",
+      "text": "我今晚七点以后还在校内。夜间辅导课收到一条换教室通知，老师漏写了新房间号。请确认应该到哪间教室上课。",
+      "features": [
+        "after-1800",
+        "on-campus"
+      ]
+    },
+    {
+      "id": "r2-6fad81795a34",
+      "topic": "morning-class",
+      "text": "口语晨课明天第一次集合，刚收到通知说提前四十分钟，预约提醒还是八点半。能确认我实际几点到吗？",
+      "features": [
+        "before-first-session",
+        "stale-notice"
+      ]
+    },
+    {
+      "id": "r2-725c3b12619a",
+      "topic": "night-study",
+      "text": "今晚在校内自习到九点，自助雨伞柜把伞柄卡在门缝里了。请联系设备管理员帮忙开柜。",
+      "features": [
+        "after-1800",
+        "on-campus"
+      ]
+    },
+    {
+      "id": "r2-72f94555fc2e",
+      "topic": "field-practice",
+      "text": "老师上传了改版实习日志模板，压缩包里少了第三张记录页。请在课程资料区补一份这张空白记录页。",
+      "features": [
+        "instructor-posted",
+        "revised-document"
+      ]
+    },
+    {
+      "id": "r2-7bdba6dd065b",
+      "topic": "studio-session-board",
+      "text": "课程画板上能进入小组页面，木工课的上课时间也已确认。我需要的课前安全清单附件只有一个封面，能否补上传清单正文？",
+      "features": [
+        "board-link",
+        "checklist-file",
+        "lesson-group"
+      ]
+    },
+    {
+      "id": "r2-8d7de14dfd8d",
+      "topic": "umbrella-borrowing",
+      "text": "图书馆门口的共享雨伞归还时没收到押金退回提示。柜子显示伞已入库，请问押金退回可以在哪查？",
+      "features": [
+        "deposit",
+        "return-confirmed"
+      ]
+    },
+    {
+      "id": "r2-a90c8e54567f",
+      "topic": "studio-session-board",
+      "text": "扎染课公布了分组，我从课程画板进入指定小组，看到的还是上学期的成员身份，连组内公告都打不开。上课时段老师已告知，请管理员更新我的小组权限。",
+      "features": [
+        "board-link",
+        "lesson-group"
+      ]
+    },
+    {
+      "id": "r2-aaabe5722706",
+      "topic": "campus-printing",
+      "text": "自助打印机扣了两份费用，只印出一份，机器已经显示任务完成。我有小票，请问可以申请退回多扣的一份吗？",
+      "features": [
+        "duplicate-charge",
+        "receipt-available"
+      ]
+    },
+    {
+      "id": "r2-ab2fcdd0d177",
+      "topic": "alumni-mail",
+      "text": "校友邮箱页面接受了密码，继续验证时仍发短信给已注销的手机。我想把验证手机号换成现在用的号码，能否走人工核验？",
+      "features": [
+        "old-phone",
+        "secondary-check"
+      ]
+    },
+    {
+      "id": "r2-c3ac0f52501a",
+      "topic": "practice-signup",
+      "text": "我是补选进练习课的，别人的报名页面都能撤回预约，轮到我会提示学生身份无权操作。能帮忙核对我的账号授权吗？",
+      "features": [
+        "newly-enrolled",
+        "peers-unaffected"
+      ]
+    },
+    {
+      "id": "r2-d8db50780e7b",
+      "topic": "studio-session-board",
+      "text": "配音练习按小组上课。我收到的录课邀请写周三 19:30，可手机日历转成了周四凌晨。请确认按本校时区应该几点加入。",
+      "features": [
+        "lesson-group",
+        "time-zone"
+      ]
+    },
+    {
+      "id": "r2-ef40539c7d91",
+      "topic": "field-practice",
+      "text": "实践课老师在课程页发了乘车分组和开课时间，校内上车集合点没有写。能确认周二应该在哪里集合吗？",
+      "features": [
+        "instructor-posted",
+        "meeting-point-omitted"
+      ]
+    },
+    {
+      "id": "r2-f13fa3749ca1",
+      "topic": "design-workshop",
+      "text": "同桌用学籍邮箱认证后能从临时访客转为正式成员。我这边认证成功仍显示访客，能把我的登录身份归到正式名册吗？",
+      "features": [
+        "peers-unaffected"
+      ]
+    },
+    {
+      "id": "r2-f4c5a16c09f9",
+      "topic": "studio-session-board",
+      "text": "从班级画板进到口语小组后，看到了本班和交换生小组两条集合时间。两组页面都能访问，请确认我的这节练习课几点开始。",
+      "features": [
+        "board-link",
+        "lesson-group"
+      ]
+    },
+    {
+      "id": "r2-fe36d832992d",
+      "topic": "morning-class",
+      "text": "我来现场找明早首堂课的教室，发现楼外无障碍通道的挡柱倒了，轮椅过不去。麻烦转物业清障。",
+      "features": [
+        "before-first-session",
+        "onsite"
+      ]
+    }
+  ]
+}
