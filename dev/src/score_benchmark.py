@@ -37,8 +37,7 @@ def index_cases(run: dict, stage: str, *, guarded: bool = False) -> dict[str, di
             raise ValueError("Case IDs must be nonempty and unique.")
         if row.get("label") not in run["labels"]:
             raise ValueError(f"{case_id!r}: label outside the benchmark categories.")
-        if row.get("correct") is not None or row.get("expected_label") is not None:
-            raise ValueError(f"{case_id!r}: run contains an in-process score or reference label.")
+        reflection.validate_blind_decision(row, case_id)
         if stage == "initial":
             reflection.required_text(row.get("reason"), f"{case_id!r} initial reason")
         gate = row.get("review_gate") if guarded else None
@@ -109,6 +108,9 @@ def score(
         or with_history["review_round_limit"] < 1
     ):
         raise ValueError("Both review arms must share the same round limit and time budget.")
+    protocol = with_history.get("blind_review_policy")
+    if without_history.get("blind_review_policy") != protocol:
+        raise ValueError("Both review arms must use the same blind review protocol.")
 
     arms = {"initial": initial_cases}
     comparisons = [
@@ -118,9 +120,9 @@ def score(
     if guarded is not None:
         if any(guarded.get(field) != with_history.get(field) for field in (
             "review_round_limit", "time_budget_seconds", "knowledge_seed_fingerprint", "knowledge_seed_cases",
-            "retrieval_policy",
+            "retrieval_policy", "blind_review_policy",
         )):
-            raise ValueError("Guarded review must use the same budget and seed as ordinary history review.")
+            raise ValueError("Guarded review must use the same protocol, budget and seed as ordinary history review.")
         comparisons.append(("review_with_guard", guarded, True, True))
 
     for name, run, enabled, is_guarded in comparisons:
@@ -132,8 +134,8 @@ def score(
         if run.get("initial_fingerprint") != digest or run.get("history_enabled") is not enabled:
             raise ValueError("Review arms must reuse the same initial results and have opposite history settings.")
         reviewed = index_cases(run, "review", guarded=is_guarded)
-        if list(reviewed) != list(initial_cases):
-            raise ValueError("Review arms must cover the same cases in the same order.")
+        if reviewed.keys() != initial_cases.keys():
+            raise ValueError("Review arms must cover the same case IDs.")
         seed = run.get("knowledge_seed_cases", [])
         if (
             not isinstance(seed, list) or any(not isinstance(item, str) for item in seed)
@@ -161,7 +163,8 @@ def score(
         measures = {"correct": 0, "cases": len(rows), "model_calls": 0, "model_seconds": 0.0}
         if name != "initial":
             measures.update(improved=0, unchanged=0, degraded=0)
-        for case_id, row in rows.items():
+        for case_id in baseline:
+            row = rows[case_id]
             correct = row["label"] == answers[case_id]
             measures["correct"] += correct
             measures["model_calls"] += len(row["calls"])
@@ -177,13 +180,17 @@ def score(
                 if "review_gate" in row:
                     detail["review_gate"] = row["review_gate"]
             cases[case_id][name] = detail
+        measures["accuracy"] = measures["correct"] / measures["cases"]
         counts[name] = measures
-    return {
+    result = {
         "task": reflection.TASK, "domain": initial["domain"],
         "gateway": initial["gateway"], "model": initial["model"],
         "blind": True, "benchmark_fingerprint": initial["benchmark_fingerprint"],
         "initial_fingerprint": digest, "counts": counts, "cases": cases,
     }
+    if protocol is not None:
+        result["blind_review_policy"] = protocol
+    return result
 
 
 def main(argv=None) -> int:

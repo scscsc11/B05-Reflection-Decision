@@ -1,0 +1,184 @@
+"""Verify blind inference, frozen inputs and offline scoring using campus-ticket fixtures."""
+
+import hashlib
+import json
+import tempfile
+import unittest
+from copy import deepcopy
+from pathlib import Path
+from unittest.mock import patch
+
+from src import reflection, scene_io, score_benchmark
+from tests.test_reflection_live import CASE, LABELS, ScriptedModel
+
+RESULT = "benchmark_results.json"
+
+
+def write_json(path, data):
+    with path.open("x", encoding="utf-8") as writer:
+        json.dump(data, writer, indent=2)
+
+
+def run_blind_trial(work: Path) -> dict[str, Path]:
+    """Create a separated in-process fixture trial for tests or local reproduction."""
+    work.mkdir()
+    seed_input, heldout = work / "seed_input", work / "heldout_input"
+    seed_input.mkdir()
+    heldout.mkdir()
+    shared = {"domain": "campus-support-r1-fixture", "labels": LABELS}
+    cases = [
+        CASE | {"id": "fix"},
+        {"id": "break", "topic": "schedule", "text": "Which room is tomorrow's lab in?", "features": ["room"]},
+        {"id": "stay", "topic": "account", "text": "The campus portal rejects my password.", "features": ["login"]},
+    ]
+    write_json(heldout / "benchmark.json", shared | {"cases": cases})
+    seed_cases = [
+        CASE | {"id": "seed-materials", "text": "Sign-in works but the digital reading is missing."},
+        cases[2] | {"id": "seed-account", "text": "My student account is locked."},
+    ]
+    write_json(seed_input / "benchmark.json", shared | {"cases": seed_cases})
+    write_json(seed_input / "answers.json", {"seed-materials": "B", "seed-account": "A"})
+
+    seed = work / "knowledge.sqlite3"
+    seed_output = work / "seed"
+    initial_output = work / "initial"
+    initial = initial_output / "norethink" / RESULT
+    arms = {
+        "without_history": (["B", "B", "A", "A", "B", "C"], False, False),
+        "with_history": (["B", "B", "A", "A", "A"], True, False),
+        "guarded": (["B", "B"], True, True),
+    }
+    model_requests = {}
+    paths = {"initial": initial, "seed": seed_output / "rethink" / RESULT}
+    with patch.object(reflection.ModelClient, "from_env", side_effect=AssertionError("Gateway contacted")):
+        reflection.run(
+            seed_input, seed_output, seed, in_process_model=ScriptedModel(["A", "B", "A", "C"]),
+        )
+        seed_bytes = seed.read_bytes()
+        with patch.object(reflection, "load_answers", side_effect=AssertionError("Blind run read answers")):
+            reflection.run(
+                heldout, initial_output, None, blind=True, review_rounds=0,
+                in_process_model=ScriptedModel(["A", "C", "A"]),
+            )
+            for arm, (replies, use_history, guard) in arms.items():
+                model = ScriptedModel(replies)
+                reflection.run(
+                    heldout, work / arm, seed if use_history else None,
+                    blind=True, initial_results=initial, review_rounds=2,
+                    use_history=use_history, guard_review=guard, in_process_model=model,
+                )
+                paths[arm] = work / arm / "rethink" / RESULT
+                model_requests[arm] = [data for _, data in model.requests]
+
+    if seed.read_bytes() != seed_bytes:
+        raise AssertionError("The blind runs modified the knowledge seed.")
+    write_json(work / "review_requests.json", model_requests)
+
+    # This file is produced only after the blind stages return.
+    answers = work / "heldout_answers.json"
+    write_json(answers, {"fix": "B", "break": "C", "stay": "A"})
+    inputs = {key: paths[key] for key in ("initial", "without_history", "with_history", "guarded")}
+    hashes = {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}
+    score_file = work / "offline_score.json"
+    status = score_benchmark.main([
+        "--initial", str(initial), "--without-history", str(inputs["without_history"]),
+        "--with-history", str(inputs["with_history"]), "--guarded", str(inputs["guarded"]),
+        "--answers", str(answers), "--output", str(score_file),
+    ])
+    if status != 0 or hashes != {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in inputs.items()}:
+        raise AssertionError("Offline scoring failed or modified inference results.")
+    write_json(work / "inference_sha256.json", hashes)
+    return paths | {"answers": answers, "score": score_file}
+
+
+class TeamIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.work = Path(folder.name) / "trial"
+
+    def test_offline_score_and_knowledge_provenance(self):
+        paths = run_blind_trial(self.work)
+        trial = {key: scene_io.read_json(path) for key, path in paths.items()}
+        scored = trial["score"]
+        self.assertEqual(scored["gateway"], "in_process_stub")
+        self.assertEqual(scored["initial_fingerprint"], reflection.fingerprint(trial["initial"]))
+        self.assertEqual(scored["counts"]["initial"]["accuracy"], 2 / 3)
+        self.assertEqual(scored["counts"]["initial"]["model_calls"], 3)
+        for arm, requests in (("without_history", 6), ("with_history", 5)):
+            with self.subTest(arm=arm):
+                counts = scored["counts"][f"review_{arm}"]
+                self.assertEqual((counts["improved"], counts["degraded"], counts["unchanged"]), (1, 1, 1))
+                self.assertEqual(counts["accuracy"], 2 / 3)
+                self.assertEqual(counts["model_calls"], requests)
+                self.assertAlmostEqual(counts["model_seconds"], sum(row["model_seconds"] for row in trial[arm]["cases"]))
+
+        requests = scene_io.read_json(self.work / "review_requests.json")
+        for arm in ("without_history", "with_history", "guarded"):
+            self.assertEqual(trial[arm]["initial_fingerprint"], scored["initial_fingerprint"])
+            for row in trial[arm]["cases"]:
+                self.assertIsNone(row["expected_label"])
+                self.assertIsNone(row["correct"])
+                self.assertFalse(row["feedback_available"])
+                self.assertTrue(all(attempt["correct"] is None for attempt in row["rounds"]))
+                sent = [call["prior_lessons"] for call in requests[arm] if call["case"]["id"] == row["id"]]
+                self.assertEqual(sent, [row["sent_lessons"]] * row["review_rounds"])
+                self.assertEqual(row["model_calls"], len(sent))
+
+        fix, broken, tie = trial["without_history"]["cases"]
+        self.assertEqual((fix["initial_label"], fix["final_label"], fix["selected_round"]), ("A", "B", 2))
+        lesson = fix["knowledge"]
+        self.assertEqual((lesson["initial_label"], lesson["case_label"], lesson["source_round"]), ("A", "B", 2))
+        self.assertTrue(lesson["from_selected_round"])
+        self.assertEqual((lesson["status"], lesson["action"]), ("unverified", "not_saved"))
+        self.assertEqual(lesson["conditions"], CASE["features"])
+        self.assertEqual(lesson["applies_when"], fix["rounds"][1]["knowledge"]["applies_when"])
+        self.assertEqual(broken["final_label"], "A")
+        self.assertEqual(tie["stop_reason"], "round_limit")
+        self.assertIsNone(tie["knowledge"])
+        self.assertEqual(len(tie["rounds"]), 2)
+        self.assertEqual(trial["with_history"]["cases"][0]["knowledge_version"], {"seed-materials": 1})
+        for row in trial["guarded"]["cases"][1:]:
+            self.assertEqual((row["review_gate"]["action"], row["model_calls"]), ("skipped", 0))
+        retained = trial["seed"]["cases"][1]
+        self.assertEqual(retained["label"], "A")
+        self.assertEqual(retained["knowledge"]["status"], "rejected")
+        self.assertEqual(retained["knowledge"]["case_label"], "C")
+        self.assertFalse(retained["knowledge"]["from_selected_round"])
+
+        cold = trial["without_history"]
+        shuffled = cold | {"cases": list(reversed(cold["cases"]))}
+        rescored = score_benchmark.score(
+            trial["initial"], shuffled, trial["with_history"], trial["answers"], guarded=trial["guarded"],
+        )
+        self.assertEqual(rescored, scored)
+        contaminated = deepcopy(cold)
+        contaminated["cases"][0]["rounds"][0]["correct"] = True
+        with self.assertRaisesRegex(ValueError, "in-process score"):
+            score_benchmark.score(trial["initial"], contaminated, trial["with_history"], trial["answers"])
+        older = {key: value for key, value in cold.items() if key != "blind_review_policy"}
+        with self.assertRaisesRegex(ValueError, "same blind review protocol"):
+            score_benchmark.score(trial["initial"], older, trial["with_history"], trial["answers"])
+
+    def test_resume_keeps_completed_blind_rounds(self):
+        paths = run_blind_trial(self.work)
+        inputs = self.work / "heldout_input"
+        output = self.work / "resumed"
+        options = {
+            "blind": True, "use_history": False, "initial_results": paths["initial"], "review_rounds": 2,
+            "checkpoint": self.work / "checkpoint.json",
+        }
+        interrupted = ScriptedModel(["B", "B", reflection.ModelError("scripted interruption")])
+        with self.assertRaisesRegex(reflection.ModelError, "scripted interruption"):
+            reflection.run(inputs, output, None, in_process_model=interrupted, **options)
+        self.assertFalse(output.exists())
+
+        resumed = ScriptedModel(["A", "A", "B", "C"])
+        reflection.run(inputs, output, None, in_process_model=resumed, **options)
+        self.assertEqual([data["case"]["id"] for _, data in resumed.requests], ["break", "break", "stay", "stay"])
+        result = scene_io.read_json(output / "rethink" / RESULT)
+        self.assertEqual(result["execution"]["resumed_cases"], 1)
+        self.assertEqual(result["execution"]["model_calls_this_run"], 4)
+        self.assertEqual(result["summary"]["model_calls"], 6)
+        self.assertEqual(result["cases"][0]["selected_round"], 2)
+        self.assertTrue(all(row["correct"] is None for row in result["cases"]))
