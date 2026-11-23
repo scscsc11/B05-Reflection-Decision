@@ -22,6 +22,8 @@ else:
 
 TASK = "support-tickets"
 GUARD_CONTEXT_POLICY = "verified_labels_only"
+GUARD_REQUEST_POLICY = "exact_match_with_request_feature"
+REQUEST_FEATURE_PREFIX = "request:"
 BLIND_REVIEW_POLICY = "majority_vote_v1"
 logger = logging.getLogger(__name__)
 INITIAL = (
@@ -157,7 +159,22 @@ def compare(initial_correct: bool | None, candidate_correct: bool | None) -> str
     return "improved" if candidate_correct else "degraded"
 
 
-def verified_review_gate(case: dict, labels: dict[str, str], draft: dict, history: list[dict]) -> dict:
+def has_unique_request_feature(features: object) -> bool:
+    if not isinstance(features, list) or any(not isinstance(feature, str) for feature in features):
+        return False
+    return sum(
+        feature.startswith(REQUEST_FEATURE_PREFIX) and bool(feature.removeprefix(REQUEST_FEATURE_PREFIX).strip())
+        for feature in features
+    ) == 1
+
+
+def verified_review_gate(
+    case: dict, labels: dict[str, str], draft: dict, history: list[dict], *, require_request_feature: bool = False,
+) -> dict:
+    if require_request_feature and not has_unique_request_feature(case["features"]):
+        return {
+            "action": "skipped", "reason": "no_unique_request_feature", "supported_label": None, "case_ids": [],
+        }
     matches = [
         item for item in history
         if item["status"] == "verified" and case["features"]
@@ -294,8 +311,11 @@ def review_without_reference(
 def review_case(
     model: ModelClient, labels: dict[str, str], case: dict, draft: dict, expected: str | None,
     history: list[dict], calls: list[dict], deadline: float, limit: int, *, guard_review: bool = False,
+    require_request_feature: bool = False,
 ) -> dict:
-    gate = verified_review_gate(case, labels, draft, history) if guard_review else None
+    gate = None
+    if guard_review:
+        gate = verified_review_gate(case, labels, draft, history, require_request_feature=require_request_feature)
     sent_lessons = guarded_prompt_lessons(history, gate) if gate is not None else history
     initial_correct = draft["label"] == expected if expected is not None else None
     if gate is not None and gate["action"] == "skipped":
@@ -493,7 +513,7 @@ def run(
     *, review_rounds: int = 2, use_history: bool = True, simulated: bool = False,
     time_budget: float = 180.0, checkpoint: Path | None = None,
     blind: bool = False, initial_results: Path | None = None, guard_review: bool = False,
-    in_process_model: ModelClient | None = None,
+    require_request_feature: bool = False, in_process_model: ModelClient | None = None,
 ) -> None:
     """Run the benchmark using the configured gateway or an injected in-process test double."""
     if not 0 <= review_rounds <= 5:
@@ -502,6 +522,8 @@ def run(
         raise ValueError("--time-budget must be positive and finite.")
     if guard_review and not (blind and review_rounds and use_history):
         raise ValueError("--guard-review requires blind review with history.")
+    if require_request_feature and not guard_review:
+        raise ValueError("--guard-require-request-feature requires --guard-review.")
     domain, labels, cases = load_benchmark(data_root / "benchmark.json")
     answers = {} if blind else load_answers(data_root / "answers.json", labels)
     scene_io.check_output_dir(data_root, out_dir)
@@ -543,6 +565,8 @@ def run(
         if guard_review:
             meta["review_policy"] = "verified_history_guard"
             meta["guard_context_policy"] = GUARD_CONTEXT_POLICY
+        if require_request_feature:
+            meta["guard_match_policy"] = GUARD_REQUEST_POLICY
         if initial_results is not None:
             frozen_initials, digest = reuse_blind_initials(initial_results, meta, cases)
             meta["initial_fingerprint"] = digest
@@ -576,6 +600,8 @@ def run(
                     signature_inputs.extend([BLIND_REVIEW_POLICY, BLIND_REVIEW])
                 if guard_review:
                     signature_inputs.append(GUARD_CONTEXT_POLICY)
+                if require_request_feature:
+                    signature_inputs.append(GUARD_REQUEST_POLICY)
                 if use_history and review_rounds:
                     signature_inputs.append(experience_store.RETRIEVAL_POLICY)
                 signature = fingerprint(signature_inputs)
@@ -617,7 +643,7 @@ def run(
                         )
                     review = review_case(
                         model, labels, case, draft, expected, history, calls, deadline, review_rounds,
-                        guard_review=guard_review,
+                        guard_review=guard_review, require_request_feature=require_request_feature,
                     )
                     knowledge = None
                     knowledge_round = None

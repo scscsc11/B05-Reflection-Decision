@@ -44,12 +44,16 @@ class ScriptedModel:
 
 
 class ReflectionTests(unittest.TestCase):
-    def review(self, replies, *, limit=5, expected=None, deadline=None, history=(), guard=False):
+    def review(
+        self, replies, *, limit=5, expected=None, deadline=None, history=(), guard=False,
+        case=CASE, require_request_feature=False,
+    ):
         model = ScriptedModel(replies)
         calls = []
         result = reflection.review_case(
-            model, LABELS, CASE, DRAFT, expected, list(history), calls,
-            perf_counter() + 30 if deadline is None else deadline, limit, guard_review=guard,
+            model, LABELS, case, DRAFT, expected, list(history), calls,
+            perf_counter() + 30 if deadline is None else deadline, limit,
+            guard_review=guard, require_request_feature=require_request_feature,
         )
         return result, calls, model.requests
 
@@ -150,3 +154,52 @@ class ReflectionTests(unittest.TestCase):
                 sent = {key: value for key, value in verified.items() if key != "lesson"}
                 self.assertEqual(result["sent_lessons"], [sent])
                 self.assertTrue(all(data["prior_lessons"] == [sent] for _, data in requests))
+
+    def test_request_feature_guard_skips_missing_or_ambiguous_request(self):
+        for request_features in ([], ["request:"], ["request:download-material", "request:confirm-location"]):
+            with self.subTest(request_features=request_features):
+                features = [*CASE["features"], *request_features]
+                case = CASE | {"features": features}
+                verified = {
+                    "case_id": "seed", "revision": 1, "topic": case["topic"], "conditions": features,
+                    "status": "verified", "case_label": "B",
+                }
+                result, calls, requests = self.review(
+                    [], case=case, history=[verified], guard=True, require_request_feature=True,
+                )
+                self.assertEqual((result["label"], result["selected_round"]), (DRAFT["label"], 0))
+                self.assertEqual(result["review_gate"]["action"], "skipped")
+                self.assertEqual(result["stop_reason"], "no_unique_request_feature")
+                self.assertEqual((calls, requests, result["sent_lessons"]), ([], [], []))
+
+    def test_request_feature_guard_requires_matching_verified_evidence(self):
+        features = [*CASE["features"], "request:download-material"]
+        case = CASE | {"features": features}
+        verified = {
+            "case_id": "seed", "revision": 1, "topic": case["topic"], "conditions": features,
+            "status": "verified", "case_label": "B",
+        }
+        other_request = verified | {
+            "case_id": "other", "conditions": [*CASE["features"], "request:confirm-location"],
+            "case_label": "C",
+        }
+        unverified = verified | {"case_id": "unverified", "status": "unverified", "case_label": "C"}
+        result, calls, requests = self.review(
+            ["B", "B"], case=case, history=[verified, other_request, unverified],
+            guard=True, require_request_feature=True,
+        )
+        self.assertEqual((result["label"], result["review_gate"]["action"]), ("B", "accepted"))
+        self.assertEqual(result["sent_lessons"], [verified])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([data["prior_lessons"] for _, data in requests], [[verified], [verified]])
+
+        same_request_conflict = verified | {"case_id": "conflict", "case_label": "C"}
+        for history in ([other_request, unverified], [verified, same_request_conflict]):
+            with self.subTest(history=history):
+                result, calls, requests = self.review(
+                    [], case=case, history=history, guard=True, require_request_feature=True,
+                )
+                self.assertEqual(result["label"], DRAFT["label"])
+                self.assertEqual(result["review_gate"]["action"], "skipped")
+                self.assertEqual(result["stop_reason"], "no_unique_verified_match")
+                self.assertEqual((calls, requests, result["sent_lessons"]), ([], [], []))

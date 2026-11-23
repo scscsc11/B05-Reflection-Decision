@@ -52,6 +52,7 @@ def index_cases(run: dict, stage: str, *, guarded: bool = False) -> dict[str, di
 
 def check_guard(
     case_id: str, row: dict, draft: dict, history: list[dict], context_policy: str | None = None,
+    *, require_request_feature: bool = False,
 ) -> None:
     gate = row.get("review_gate")
     if not isinstance(gate, dict):
@@ -74,6 +75,10 @@ def check_guard(
             not evidence or set(evidence) != {item["case_id"] for item in topic_evidence}
         ):
             raise ValueError(f"{case_id!r}: review did not use the evidence that authorized it.")
+        if require_request_feature and any(
+            not reflection.has_unique_request_feature(lesson.get("conditions")) for lesson in topic_evidence
+        ):
+            raise ValueError(f"{case_id!r}: guard evidence must have exactly one request feature.")
     if action in ("skipped", "kept_initial"):
         if row["label"] == draft["label"] and row.get("selected_round") == 0:
             return
@@ -117,7 +122,13 @@ def score(
         ("review_without_history", without_history, False, False),
         ("review_with_history", with_history, True, False),
     ]
+    match_policy = guarded.get("guard_match_policy") if guarded is not None else None
     if guarded is not None:
+        if match_policy is not None and (
+            match_policy != reflection.GUARD_REQUEST_POLICY
+            or guarded.get("guard_context_policy") != reflection.GUARD_CONTEXT_POLICY
+        ):
+            raise ValueError("Unknown guard match policy or missing guard context policy.")
         if any(guarded.get(field) != with_history.get(field) for field in (
             "review_round_limit", "time_budget_seconds", "knowledge_seed_fingerprint", "knowledge_seed_cases",
             "retrieval_policy", "blind_review_policy",
@@ -153,7 +164,10 @@ def score(
             ):
                 raise ValueError(f"{case_id!r}: review used knowledge outside the declared seed.")
             if is_guarded:
-                check_guard(case_id, row, draft, history, run.get("guard_context_policy"))
+                check_guard(
+                    case_id, row, draft, history, run.get("guard_context_policy"),
+                    require_request_feature=match_policy == reflection.GUARD_REQUEST_POLICY,
+                )
         arms[name] = reviewed
 
     baseline = {case_id: row["label"] == answers[case_id] for case_id, row in initial_cases.items()}
@@ -190,6 +204,8 @@ def score(
     }
     if protocol is not None:
         result["blind_review_policy"] = protocol
+    if match_policy is not None:
+        result["guard_match_policy"] = match_policy
     return result
 
 

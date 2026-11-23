@@ -49,6 +49,7 @@ def complete(stage: str, instructions: str, data: dict, schema: dict, *, budget:
 | `--blind`、`--initial-results` | 盲态初判使用 `--review-rounds 0`。盲态复核使用同一案例和同一模型配置的冻结初判。留出答案交离线评分器。 |
 | `--knowledge-db`、`--no-history` | 带反馈的复核使用可写库。启用历史的盲态复核以只读方式打开与留出案例分离的种子库。`--no-history` 跳过检索。 |
 | `--guard-review` | 用于启用历史的盲态复核。使用条件精确匹配且来源标签已验证的记录。只有这些记录支持同一类别且该类别不同于初判时才启动复核。 |
+| `--guard-require-request-feature` | 与 `--guard-review` 联用。条件完全匹配时另核对是否恰有一个格式为 `request:<动作>` 的主诉特征。结果记录匹配策略，断点校验包含该策略。 |
 | `--checkpoint` | 每例完成后写断点。继续同一运行时复用输入、模型配置、知识状态和断点。断点与数据库分别放在输入目录和结果目录之外。 |
 | `--simulated-gateway` | 用于本地脚本化网关。进程内替身通过 `reflection.run(..., in_process_model=...)` 注入，具有独立的来源标记。 |
 

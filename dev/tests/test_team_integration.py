@@ -2,15 +2,17 @@
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr
 from copy import deepcopy
+from functools import partial
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from src import reflection, scene_io, score_benchmark
+from src import main, reflection, scene_io, score_benchmark
 from tests.test_reflection_live import CASE, LABELS, ScriptedModel
 
 RESULT = "benchmark_results.json"
@@ -220,6 +222,46 @@ class TeamIntegrationTests(unittest.TestCase):
         self.assertEqual(rejected["provenance"],
                          {"initial_label": "A", "source_round": 1, "selected_round": 0, "final_label": "A"})
         self.assertEqual((rejected["case_label"], rejected["status"]), ("C", "rejected"))
+
+    def test_request_feature_guard_uses_separate_checkpoint_and_score_policy(self):
+        paths = run_blind_trial(self.work)
+        inputs = self.work / "heldout_input"
+        output = self.work / "request_guard"
+        seed = self.work / "knowledge.sqlite3"
+        checkpoint = self.work / "request_guard_checkpoint.json"
+        model = ScriptedModel([])
+        run_in_process = partial(reflection.run, in_process_model=model)
+        with (
+            patch.dict(os.environ, {"DATA_ROOT": str(inputs)}),
+            patch.object(reflection, "run", wraps=run_in_process),
+            patch.object(reflection, "load_answers", side_effect=AssertionError("Blind run read answers")),
+        ):
+            status = main.main([
+                "--task", reflection.TASK, "--out-dir", str(output), "--blind",
+                "--guard-review", "--guard-require-request-feature",
+                "--initial-results", str(paths["initial"]), "--knowledge-db", str(seed),
+                "--checkpoint", str(checkpoint),
+            ])
+        self.assertEqual(status, 0)
+        self.assertEqual(model.requests, [])
+        guarded = scene_io.read_json(output / "rethink" / RESULT)
+        self.assertEqual(guarded["guard_match_policy"], reflection.GUARD_REQUEST_POLICY)
+        self.assertTrue(all(row["stop_reason"] == "no_unique_request_feature" for row in guarded["cases"]))
+
+        initial, cold, warm, answers = (
+            scene_io.read_json(paths[name]) for name in ("initial", "without_history", "with_history", "answers")
+        )
+        score = score_benchmark.score(initial, cold, warm, answers, guarded=guarded)
+        self.assertEqual(score["guard_match_policy"], reflection.GUARD_REQUEST_POLICY)
+
+        falsely_tagged = scene_io.read_json(paths["guarded"]) | {"guard_match_policy": reflection.GUARD_REQUEST_POLICY}
+        with self.assertRaisesRegex(ValueError, "exactly one request feature"):
+            score_benchmark.score(initial, cold, warm, answers, guarded=falsely_tagged)
+        with self.assertRaisesRegex(ValueError, "Checkpoint differs"):
+            reflection.run(
+                inputs, self.work / "legacy_guard", seed, blind=True, guard_review=True,
+                initial_results=paths["initial"], checkpoint=checkpoint, in_process_model=model,
+            )
 
     def test_resume_keeps_completed_blind_rounds(self):
         paths = run_blind_trial(self.work)

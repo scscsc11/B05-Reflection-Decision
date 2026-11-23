@@ -1,0 +1,79 @@
+{
+  "domain": "campus-support-request-conditions-synthetic",
+  "labels": {
+    "account": "账户登录、身份验证和账户权限",
+    "materials": "课程资料、课件和课程阅读文件",
+    "schedule": "上课时间、教室和排课通知",
+    "other": "不属于上述类别的校园服务问题"
+  },
+  "cases": [
+    {
+      "id": "req-h01",
+      "topic": "field-workshop-helpdesk",
+      "text": "刚补选进校园观察工作坊。我在帮助台看到周五的上课通知，一处说在温室旁活动室，另一处说在标本室。请告诉我这节课应该去哪个教室。",
+      "features": [
+        "help-desk",
+        "new-enrollment"
+      ]
+    },
+    {
+      "id": "req-h02",
+      "topic": "field-workshop-helpdesk",
+      "text": "昨天在帮助台完成了地理实践课的补选，今天用学号登录仍提示未加入课程，不能看小组页面。请把补选资格同步到我的账号。",
+      "features": [
+        "help-desk",
+        "new-enrollment"
+      ]
+    },
+    {
+      "id": "req-h03",
+      "topic": "media-class-room-change",
+      "text": "纪录片工作坊原定的图书馆小放映室临时关闭，老师通知挪到同层的另一间房，却没有写房号。请核实本次上课的房间号。",
+      "features": [
+        "library-studio",
+        "request:confirm-location",
+        "room-change"
+      ]
+    },
+    {
+      "id": "req-h04",
+      "topic": "media-class-room-change",
+      "text": "媒介读写课换到图书馆研讨室，地点已经确认。老师在改期公告中提到《镜头分析练习》讲义，可是课程文件里只有封面。请补传讲义正文。",
+      "features": [
+        "library-studio",
+        "request:obtain-handout",
+        "room-change"
+      ]
+    },
+    {
+      "id": "req-h05",
+      "topic": "course-reading-bulletin",
+      "text": "阅读清单上的第五篇案例只能看到标题。课程公告确认已经发布，版务说原附件忘了发布正文。请补发这篇阅读的完整文件。",
+      "features": [
+        "class-bulletin",
+        "reading-list",
+        "request:restore-access"
+      ]
+    },
+    {
+      "id": "req-h06",
+      "topic": "course-handout-terminal",
+      "text": "我在校内终端可以浏览课堂课件，但《展板尺寸》这一份下载下来是空白。我的同组同学也拿到同样的空文件，请上传完整的尺寸表。",
+      "features": [
+        "handout-terminal",
+        "onsite",
+        "request:restore-access"
+      ]
+    },
+    {
+      "id": "req-h07",
+      "topic": "photo-printing-counter",
+      "text": "校园活动中心的冲印窗口把我已经付费的取件码扫重了，收据上有两笔相同费用。请帮我退还重复收费的一笔。",
+      "features": [
+        "campus-counter",
+        "duplicate-charge",
+        "request:refund-charge"
+      ]
+    }
+  ]
+}
