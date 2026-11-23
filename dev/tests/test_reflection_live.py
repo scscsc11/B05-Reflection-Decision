@@ -1,5 +1,6 @@
 """Exercise support-ticket reflection with a scripted, in-process model."""
 
+import json
 import unittest
 from copy import deepcopy
 from time import perf_counter
@@ -87,8 +88,23 @@ class ReflectionTests(unittest.TestCase):
 
     def test_model_cost_records_retry_and_success(self):
         replies = [reflection.ModelError("retry once", retry_after=0), "B", "B"]
-        with patch.object(reflection, "perf_counter", side_effect=[10, 10.125, 10.25, 11, 11.5, 12, 12.75]):
+        with (
+            patch.object(reflection, "perf_counter", side_effect=[10, 10.125, 10.25, 11, 11.5, 12, 12.75]),
+            self.assertLogs(reflection.logger, level="INFO") as log,
+        ):
             result, calls, _ = self.review(replies, deadline=100)
+        starts = []
+        finishes = []
+        for entry in log.records:
+            prefix, _, payload = entry.getMessage().partition(" {")
+            if prefix == "Model call started":
+                starts.append(json.loads("{" + payload))
+            elif prefix == "Model call finished":
+                finishes.append(json.loads("{" + payload))
+        self.assertEqual(finishes, [{"case_id": CASE["id"], **call} for call in calls])
+        self.assertEqual(starts, [
+            {field: call[field] for field in ("case_id", "stage", "round", "attempt")} for call in finishes
+        ])
         row = reflection.audit_case(result | {"calls": calls}, DRAFT["label"])
         self.assertEqual([(call["round"], call["attempt"], call["ok"]) for call in calls],
                          [(1, 1, False), (1, 2, True), (2, 1, True)])

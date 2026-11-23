@@ -113,6 +113,8 @@ def decide(model: ModelClient, stage: str, instructions: str, labels: dict[str, 
         remaining = deadline - started
         if remaining <= 0:
             raise ModelError(f"Case {case['id']!r}, {stage}: model-call budget exhausted.")
+        call = {"case_id": case["id"], "stage": stage, "round": context.get("round", 0), "attempt": attempt}
+        logger.info("Model call started %s", json.dumps(call, ensure_ascii=True))
         ok = False
         try:
             reply = model.complete(stage, instructions, data, schema, budget=remaining)
@@ -137,11 +139,12 @@ def decide(model: ModelClient, stage: str, instructions: str, labels: dict[str, 
             if attempt == 2 or delay is None or delay >= deadline - perf_counter():
                 raise ModelError(f"Case {case['id']!r}, {stage}: {exc}") from None
         finally:
-            elapsed = perf_counter() - started
-            calls.append({"stage": stage, "round": context.get("round", 0), "attempt": attempt,
-                          "seconds": elapsed, "ok": ok})
-            logger.info("Model call case=%r stage=%s round=%s attempt=%d time=%.3fs ok=%s.",
-                        case["id"], stage, context.get("round", 0), attempt, elapsed, ok)
+            completed = {
+                "stage": stage, "round": call["round"], "attempt": attempt,
+                "seconds": perf_counter() - started, "ok": ok,
+            }
+            calls.append(completed)
+            logger.info("Model call finished %s", json.dumps(call | completed, ensure_ascii=True))
         logger.info("Retrying case=%r stage=%s in %.3fs.", case["id"], stage, delay)
         sleep(delay)
 
