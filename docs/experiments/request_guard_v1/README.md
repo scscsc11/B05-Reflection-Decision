@@ -51,3 +51,22 @@ python3 -B docs/experiments/request_guard_v1/compare_personal.py \
 ```
 
 `--live` 也支持在本机交互终端补入缺少的环境值，API Key 采用隐藏输入。
+
+### 由模型生成种子经验
+
+`learn_seed.py` 对选定的种子工单各执行一次初判和一次带反馈的复核。经验库存有复核的来源轮次和最终选择。来源类别与该种子工单的参考标签一致时记为 `verified`，其余候选作为 `rejected` 保留。留出工单和答案由后续对照读取。
+
+先检查费用上限。单条种子最多 2 次请求，初判与复核的输出上限合计 256 Token，输入另计。
+
+```bash
+python3 -B docs/experiments/request_guard_v1/learn_seed.py --case-id req-s01
+```
+
+生成实际种子时，沿用个人网关的环境变量，并选择新的运行目录。Windows Python 的输出使用本地磁盘路径。
+
+```bash
+python3 -B docs/experiments/request_guard_v1/learn_seed.py \
+  --case-id req-s01 --live --max-requests 2 --out-dir tmp/knowledge_applicability_learned_s01
+```
+
+生成的 `seed.sqlite3` 和 `seed_run.json` 保存在同一目录。运行 `compare_personal.py` 时用 `--seed-dir` 指定该目录。对照在调用前核对来源、模型配置、案例集合和数据库摘要，并以只读方式打开种子库。该批留出工单的请求上限由库内实际可用的经验决定。`--fixture` 用于无付费验收。

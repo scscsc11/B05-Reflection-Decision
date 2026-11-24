@@ -27,6 +27,11 @@ def frozen_file(manifest, name):
     return scene_io.read_json(ROOT / name, expected_sha256=manifest["sha256"][name])
 
 
+def gateway_fingerprint(model):
+    profile = {key: value for key, value in model.profile.items() if key != "max_requests"}
+    return reflection.fingerprint([model.endpoint, model.model, model.use_json_schema, model.timeout, profile])
+
+
 def prepare(manifest, ids):
     seed = frozen_file(manifest, "seed_input/benchmark.json")
     heldout = frozen_file(manifest, "heldout_input/benchmark.json")
@@ -52,6 +57,43 @@ def prepare(manifest, ids):
             "status": "verified", "source": "synthetic_reference_fixture",
         })
     return heldout | {"cases": cases}, lessons
+
+
+def load_learned_seed(directory, dataset, fixture_lessons, *, source=None):
+    report_path = directory / "seed_run.json"
+    report = scene_io.read_json(report_path)
+    seed_path = directory / "seed.sqlite3"
+    if (
+        report.get("passed") is not True or report.get("source") not in {"personal_gateway", "in_process_stub"}
+        or (source is not None and report["source"] != source)
+        or report.get("manifest_sha256") != digest(ROOT / "manifest.json")
+        or report.get("seed_sha256") != digest(seed_path)
+    ):
+        raise ValueError("The learned seed does not match this benchmark or gateway source.")
+    scope = reflection.fingerprint([reflection.TASK, dataset["domain"], dataset["labels"], report["source"]])
+    if report.get("scope") != scope:
+        raise ValueError("The learned seed scope differs from the held-out benchmark.")
+    lessons = reflection.blind_seed(seed_path, scope, {case["id"] for case in dataset["cases"]})
+    ids = report.get("seed_case_ids")
+    if (
+        not isinstance(ids, list) or any(not isinstance(case_id, str) for case_id in ids)
+        or len(lessons) != len(ids) or {row["case_id"] for row in lessons} != set(ids)
+    ):
+        raise ValueError("Learned seed case IDs do not match the seed report.")
+    expected = {row["case_id"]: row for row in fixture_lessons}
+    for row in lessons:
+        reference = expected.get(row["case_id"])
+        if (
+            reference is None or row.get("topic") != reference["topic"]
+            or row.get("conditions") != reference["conditions"]
+            or row.get("expected_label") != reference["expected_label"]
+            or row.get("case_label") not in dataset["labels"] or row.get("source") != report["source"]
+        ):
+            raise ValueError("A learned record does not match its frozen seed case.")
+        status = "verified" if row["case_label"] == reference["expected_label"] else "rejected"
+        if row.get("status") != status or not isinstance(row.get("provenance"), dict):
+            raise ValueError("A learned record is missing valid review provenance.")
+    return lessons, (seed_path, report)
 
 
 def request_bound(dataset, lessons, rounds, *, reuse_initial=False):
@@ -136,24 +178,34 @@ def fixture_factory(*handlers):
     return SimpleNamespace(open=open_fixture)
 
 
-def run(work, manifest, dataset, lessons, model, plan, *, live, initial_results=None):
+def run(work, manifest, dataset, lessons, model, plan, *, live, initial_results=None, learned_seed=None):
     if model.calls or model.reused_reviews:
         raise ValueError("Start each comparison with a fresh model client.")
     work.mkdir(parents=True)
     data = work / "heldout_input"
     data.mkdir()
     write(data / "benchmark.json", dataset)
-    seed_path = work / "seed.sqlite3"
     gateway = "personal_gateway" if live else "in_process_stub"
-    scope = reflection.fingerprint([reflection.TASK, dataset["domain"], dataset["labels"], gateway])
-    with closing(reflection.experience_store.open_store(seed_path)) as db, db:
-        for entry in lessons:
-            reflection.experience_store.save_lesson(db, scope, entry["case_id"], entry)
+    seed_source = "synthetic_reference_fixture"
+    if learned_seed is None:
+        seed_path = work / "seed.sqlite3"
+        scope = reflection.fingerprint([reflection.TASK, dataset["domain"], dataset["labels"], gateway])
+        with closing(reflection.experience_store.open_store(seed_path)) as db, db:
+            for entry in lessons:
+                reflection.experience_store.save_lesson(db, scope, entry["case_id"], entry)
+    else:
+        seed_path, seed_report = learned_seed
+        if (
+            seed_report["source"] != gateway or seed_report["model_fingerprint"] != gateway_fingerprint(model)
+            or seed_report["seed_sha256"] != digest(seed_path)
+        ):
+            raise ValueError("The learned seed was created with a different model setup or changed on disk.")
+        seed_source = "model_extracted"
     seed_hash = digest(seed_path)
     result = {
         "source": gateway, "model": model.model, "model_profile": model.profile, "passed": False,
         "case_ids": [case["id"] for case in dataset["cases"]], "request_plan": plan,
-        "seed_source": "synthetic_reference_fixture", "seed_sha256": seed_hash,
+        "seed_source": seed_source, "seed_sha256": seed_hash, "seed_database": str(seed_path),
         "calls": model.calls, "reused_initials": initial_results is not None,
         "review_response_policy": "reuse_identical_requests", "reused_reviews": model.reused_reviews,
     }
@@ -286,10 +338,15 @@ def main():
     parser.add_argument("--max-requests", type=int, help="hard lifetime budget for a live comparison")
     parser.add_argument("--out-dir", type=Path, help="new directory for a fixture or live comparison")
     parser.add_argument("--initial-results", type=Path, help="reuse matching frozen initials from this runner")
+    parser.add_argument("--seed-dir", type=Path, help="use a read-only seed produced by learn_seed.py")
     args = parser.parse_args()
     try:
         manifest = scene_io.read_json(ROOT / "manifest.json")
         dataset, lessons = prepare(manifest, args.case_id)
+        learned_seed = None
+        if args.seed_dir is not None:
+            source = "personal_gateway" if args.live else "in_process_stub" if args.fixture else None
+            lessons, learned_seed = load_learned_seed(args.seed_dir.resolve(), dataset, lessons, source=source)
         plan = request_bound(dataset, lessons, manifest["review_rounds"], reuse_initial=args.initial_results is not None)
         if not (args.live or args.fixture):
             print(json.dumps({"mode": "request_plan", "case_ids": args.case_id, **plan}, indent=2))
@@ -313,7 +370,8 @@ def main():
         model = PairedStreamClient(config, max_requests=cap, initial_cap=INITIAL_CAP, review_cap=REVIEW_CAP,
                                      opener_factory=opener)
         report = run(out, manifest, dataset, lessons, model, plan, live=args.live,
-                     initial_results=args.initial_results.resolve() if args.initial_results else None)
+                     initial_results=args.initial_results.resolve() if args.initial_results else None,
+                     learned_seed=learned_seed)
         print(json.dumps({"result": str(out / "comparison.json"), "passed": report["passed"],
                           "requests": report["requests"], "observed_tokens": report["observed_tokens"],
                           "reused_reviews": len(report["reused_reviews"]),
