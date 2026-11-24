@@ -37,3 +37,17 @@ python3 -B docs/experiments/request_guard_v1/compare_personal.py \
 ```
 
 Windows Python 运行时，将 `--out-dir` 指到 Windows 本地磁盘，例如 `%LOCALAPPDATA%` 下的独立目录，以便 SQLite 正常加锁。无付费验收用 `--fixture` 代替 `--live`。已有同一入口生成的冻结初判时，通过 `--initial-results` 重用该文件。案例顺序、模型地址和响应配置须匹配，新的总请求上限可按剩余阶段计算。
+
+### 费用与配对口径
+
+两组的复核指令、案例、历史上下文和响应结构完全一致时，共用第一次模型答复。每组仍各自按原有规则决定是否复核和何时停止。`logical_reviews` 记录策略实际触发的复核轮数，`calls` 记录对网关真正发出的请求。`reused_reviews` 指向复用的请求序号。请求用量记在首次发送的组。
+
+这项配对用于观察知识门控的差异。共用答复的轮次只产生一次模型采样。下一批可固定 `req-h02` 和 `req-h03`，分别检查缺少主诉标记的同类历史、具备主诉标记的匹配历史。两条工单合计最多 6 次真实请求，输出预算上限为 832 Token，输入另计。
+
+```bash
+python3 -B docs/experiments/request_guard_v1/compare_personal.py \
+  --case-id req-h02 --case-id req-h03 --live --max-requests 6 \
+  --out-dir tmp/knowledge_applicability_live_h02_h03
+```
+
+`--live` 也支持在本机交互终端补入缺少的环境值，API Key 采用隐藏输入。

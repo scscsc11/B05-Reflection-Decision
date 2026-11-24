@@ -3,12 +3,16 @@
 import argparse
 import io
 import json
+import math
 import os
 import sqlite3
 import sys
 from contextlib import closing
+from copy import deepcopy
+from getpass import GetPassWarning, getpass
 from pathlib import Path
 from types import SimpleNamespace
+from warnings import catch_warnings, simplefilter
 
 from run_comparison import ROOT, RESULT, Model, digest, reflection, scene_io, score_benchmark, write
 from personal_stream import PersonalStreamClient
@@ -54,23 +58,59 @@ def request_bound(dataset, lessons, rounds, *, reuse_initial=False):
     labels = dataset["labels"]
     initials = 0 if reuse_initial else len(dataset["cases"])
     bounds = {arm: 0 for arm, _ in ARMS}
+    reviews = 0
     for case in dataset["cases"]:
         history, _ = reflection.experience_store.select_lessons(
             lessons, case["topic"], case["features"], case["id"],
         )
-        for arm, requires_request in ARMS:
-            if any(
-                reflection.verified_review_gate(
+        eligible = set()
+        distinct_contexts = 0
+        for label in labels:
+            contexts = set()
+            for arm, requires_request in ARMS:
+                gate = reflection.verified_review_gate(
                     case, labels, {"label": label}, history, require_request_feature=requires_request,
-                )["action"] == "review" for label in labels
-            ):
-                bounds[arm] += rounds
-    reviews = sum(bounds.values())
+                )
+                if gate["action"] == "review":
+                    eligible.add(arm)
+                    contexts.add(reflection.fingerprint(reflection.guarded_prompt_lessons(history, gate)))
+            distinct_contexts = max(distinct_contexts, len(contexts))
+        for arm in eligible:
+            bounds[arm] += rounds
+        reviews += rounds * distinct_contexts
     return {
-        "initial_requests": initials, "review_requests_by_arm": bounds,
+        "initial_requests": initials, "review_requests_by_arm": bounds, "distinct_review_requests": reviews,
         "max_requests": initials + reviews,
         "requested_output_token_cap": initials * INITIAL_CAP + reviews * REVIEW_CAP,
     }
+
+
+class PairedStreamClient(PersonalStreamClient):
+    """Use one sampled reply for identical review requests within a comparison."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.arm = "initial"
+        self.reused_reviews = []
+        self._review_responses = {}
+
+    def complete(self, stage, instructions, data, schema, *, budget=None):
+        if stage != "review":
+            return super().complete(stage, instructions, data, schema, budget=budget)
+        key = reflection.fingerprint([stage, instructions, data, schema])
+        if budget is not None and (not math.isfinite(budget) or budget <= 0):
+            raise ModelError("Model-call time budget exhausted.")
+        cached = self._review_responses.get(key)
+        if cached is not None and cached[2] != self.arm:
+            reply, request_number, _ = cached
+            self.reused_reviews.append({
+                "arm": self.arm, "case_id": data["case"]["id"], "round": data["round"],
+                "source_request_number": request_number,
+            })
+            return deepcopy(reply)
+        reply = super().complete(stage, instructions, data, schema, budget=budget)
+        self._review_responses[key] = (deepcopy(reply), len(self.calls), self.arm)
+        return reply
 
 
 def fixture_factory(*handlers):
@@ -97,6 +137,8 @@ def fixture_factory(*handlers):
 
 
 def run(work, manifest, dataset, lessons, model, plan, *, live, initial_results=None):
+    if model.calls or model.reused_reviews:
+        raise ValueError("Start each comparison with a fresh model client.")
     work.mkdir(parents=True)
     data = work / "heldout_input"
     data.mkdir()
@@ -113,6 +155,7 @@ def run(work, manifest, dataset, lessons, model, plan, *, live, initial_results=
         "case_ids": [case["id"] for case in dataset["cases"]], "request_plan": plan,
         "seed_source": "synthetic_reference_fixture", "seed_sha256": seed_hash,
         "calls": model.calls, "reused_initials": initial_results is not None,
+        "review_response_policy": "reuse_identical_requests", "reused_reviews": model.reused_reviews,
     }
     setting = {"blind": True, "time_budget": manifest["time_budget_seconds"]}
     setting["personal_model" if live else "in_process_model"] = model
@@ -151,6 +194,7 @@ def run(work, manifest, dataset, lessons, model, plan, *, live, initial_results=
         result.update(initial=str(initial_results), initial_sha256=initial_hash)
         arms = {}
         for arm, requires_request in ARMS:
+            model.arm = arm
             start = len(model.calls)
             try:
                 reflection.run(
@@ -193,6 +237,7 @@ def run(work, manifest, dataset, lessons, model, plan, *, live, initial_results=
                 totals[arm][change] += 1
                 paired[case_id][arm] = {
                     "final_label": row["label"], "stop_reason": row["stop_reason"], "outcome": change,
+                    "logical_reviews": row["model_calls"],
                     "sent_seed_case_ids": [item["case_id"] for item in row["sent_lessons"]],
                 }
         result.update(passed=True, cases=paired, metrics=totals)
@@ -207,12 +252,29 @@ def run(work, manifest, dataset, lessons, model, plan, *, live, initial_results=
         matching = [call for call in model.calls if call["arm"] == arm]
         result["cost_by_arm"][arm] = {
             "requests": len(matching),
+            "reused_reviews": sum(item["arm"] == arm for item in model.reused_reviews),
             "observed_tokens": sum(call["usage"].get("total_tokens", 0) for call in matching),
         }
     result["calls_without_usage"] = sum("total_tokens" not in call["usage"] for call in model.calls)
     result["observed_tokens"] = sum(call["usage"].get("total_tokens", 0) for call in model.calls)
     write(work / "comparison.json", result)
     return result
+
+
+def live_config():
+    for variable, label in (("LLM_BASE_URL", "Base URL"), ("LLM_MODEL", "Model ID")):
+        if not os.environ.get(variable, "").strip() and sys.stdin.isatty():
+            os.environ[variable] = input(f"{label}: ").strip()
+    if not os.environ.get("LLM_API_KEY", "").strip() and sys.stdin.isatty():
+        with catch_warnings():
+            simplefilter("error", GetPassWarning)
+            key = getpass("API key (hidden): ").strip()
+        if len(key) >= 2 and key[0] in ("'", '"') and key[0] == key[-1]:
+            key = key[1:-1].strip()
+        if any(not (33 <= ord(char) <= 126) or char in ("'", '"') for char in key):
+            raise ValueError("Paste the complete API key without whitespace or control characters.")
+        os.environ["LLM_API_KEY"] = key
+    return ModelClient.from_env()
 
 
 def main():
@@ -243,20 +305,21 @@ def main():
             parser.error(f"Choose a run budget of at least {plan['max_requests']} requests for the selected comparison.")
         cap = min(args.max_requests, plan["max_requests"]) if args.max_requests is not None else plan["max_requests"]
         if args.live:
-            config = ModelClient.from_env()
+            config = live_config()
             opener = None
         else:
             config = ModelClient("https://offline.invalid/v1/chat/completions", "request-policy-fixture", "fixture")
             opener = fixture_factory
-        model = PersonalStreamClient(config, max_requests=cap, initial_cap=INITIAL_CAP, review_cap=REVIEW_CAP,
+        model = PairedStreamClient(config, max_requests=cap, initial_cap=INITIAL_CAP, review_cap=REVIEW_CAP,
                                      opener_factory=opener)
         report = run(out, manifest, dataset, lessons, model, plan, live=args.live,
                      initial_results=args.initial_results.resolve() if args.initial_results else None)
         print(json.dumps({"result": str(out / "comparison.json"), "passed": report["passed"],
                           "requests": report["requests"], "observed_tokens": report["observed_tokens"],
+                          "reused_reviews": len(report["reused_reviews"]),
                           "metrics": report.get("metrics"), "error": report.get("error")}, ensure_ascii=True))
         return 0 if report["passed"] else 1
-    except (OSError, ValueError, ModelError, KeyError, sqlite3.Error) as error:
+    except (OSError, ValueError, ModelError, KeyError, sqlite3.Error, GetPassWarning) as error:
         parser.exit(1, f"{error}\n")
 
 
