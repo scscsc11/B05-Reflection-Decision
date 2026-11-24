@@ -1,0 +1,264 @@
+"""Run the frozen campus-ticket guard comparison using a bounded personal gateway."""
+
+import argparse
+import io
+import json
+import os
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+from types import SimpleNamespace
+
+from run_comparison import ROOT, RESULT, Model, digest, reflection, scene_io, score_benchmark, write
+from personal_stream import PersonalStreamClient
+from src.llm_client import ModelClient, ModelError
+
+INITIAL_CAP = 96
+REVIEW_CAP = 160
+ARMS = (("request_required", True), ("baseline", False))
+
+
+def frozen_file(manifest, name):
+    return scene_io.read_json(ROOT / name, expected_sha256=manifest["sha256"][name])
+
+
+def prepare(manifest, ids):
+    seed = frozen_file(manifest, "seed_input/benchmark.json")
+    heldout = frozen_file(manifest, "heldout_input/benchmark.json")
+    answers = frozen_file(manifest, "seed_input/answers.json")
+    if (seed["domain"], seed["labels"]) != (heldout["domain"], heldout["labels"]):
+        raise ValueError("Seed and held-out benchmark definitions differ.")
+    cases_by_id = {row["id"]: row for row in heldout["cases"]}
+    if len(set(ids)) != len(ids) or any(case_id not in cases_by_id for case_id in ids):
+        raise ValueError("Choose distinct case IDs from the frozen held-out benchmark.")
+    if {row["id"] for row in seed["cases"]} != answers.keys() or set(ids) & answers.keys():
+        raise ValueError("Seed identity or reference coverage is inconsistent.")
+    cases = [cases_by_id[case_id] for case_id in ids]
+    lessons = []
+    for row in seed["cases"]:
+        label = answers[row["id"]]
+        if label not in seed["labels"]:
+            raise ValueError("A seed label is outside the benchmark categories.")
+        lessons.append({
+            "case_id": row["id"], "revision": 1,
+            "task": reflection.TASK, "domain": seed["domain"], "topic": row["topic"],
+            "conditions": row["features"], "case_label": label, "expected_label": label,
+            "problem": "识别工单主诉", "lesson": "按主诉核对工单类别", "applies_when": "工单条件和主诉匹配",
+            "status": "verified", "source": "synthetic_reference_fixture",
+        })
+    return heldout | {"cases": cases}, lessons
+
+
+def request_bound(dataset, lessons, rounds, *, reuse_initial=False):
+    labels = dataset["labels"]
+    initials = 0 if reuse_initial else len(dataset["cases"])
+    bounds = {arm: 0 for arm, _ in ARMS}
+    for case in dataset["cases"]:
+        history, _ = reflection.experience_store.select_lessons(
+            lessons, case["topic"], case["features"], case["id"],
+        )
+        for arm, requires_request in ARMS:
+            if any(
+                reflection.verified_review_gate(
+                    case, labels, {"label": label}, history, require_request_feature=requires_request,
+                )["action"] == "review" for label in labels
+            ):
+                bounds[arm] += rounds
+    reviews = sum(bounds.values())
+    return {
+        "initial_requests": initials, "review_requests_by_arm": bounds,
+        "max_requests": initials + reviews,
+        "requested_output_token_cap": initials * INITIAL_CAP + reviews * REVIEW_CAP,
+    }
+
+
+def fixture_factory(*handlers):
+    model = Model()
+
+    class Stream(io.BytesIO):
+        headers = {"Content-Type": "text/event-stream"}
+
+    def open_fixture(request, *, timeout):
+        payload = json.loads(request.data)
+        data = json.loads(payload["messages"][-1]["content"])
+        assert "expected_label" not in data
+        if data["stage"] == "review":
+            assert data["feedback"] == {"correct": None, "incorrect_labels": []}
+            assert all("expected_label" not in entry for entry in data["prior_lessons"])
+        result = model.complete(data["stage"], "", data, {}, budget=timeout)
+        frames = [
+            {"choices": [{"index": 0, "delta": {"content": json.dumps(result)}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return Stream(b"".join(b"data: " + json.dumps(frame).encode() + b"\n\n" for frame in frames)
+                      + b"data: [DONE]\n\n")
+    return SimpleNamespace(open=open_fixture)
+
+
+def run(work, manifest, dataset, lessons, model, plan, *, live, initial_results=None):
+    work.mkdir(parents=True)
+    data = work / "heldout_input"
+    data.mkdir()
+    write(data / "benchmark.json", dataset)
+    seed_path = work / "seed.sqlite3"
+    gateway = "personal_gateway" if live else "in_process_stub"
+    scope = reflection.fingerprint([reflection.TASK, dataset["domain"], dataset["labels"], gateway])
+    with closing(reflection.experience_store.open_store(seed_path)) as db, db:
+        for entry in lessons:
+            reflection.experience_store.save_lesson(db, scope, entry["case_id"], entry)
+    seed_hash = digest(seed_path)
+    result = {
+        "source": gateway, "model": model.model, "model_profile": model.profile, "passed": False,
+        "case_ids": [case["id"] for case in dataset["cases"]], "request_plan": plan,
+        "seed_source": "synthetic_reference_fixture", "seed_sha256": seed_hash,
+        "calls": model.calls, "reused_initials": initial_results is not None,
+    }
+    setting = {"blind": True, "time_budget": manifest["time_budget_seconds"]}
+    setting["personal_model" if live else "in_process_model"] = model
+    offline_answer = (ROOT / "offline/answers.json").resolve()
+    scoring = False
+    auditing = True
+    answer_reads = []
+
+    def audit(event, args):
+        if not auditing:
+            return
+        if not live and event.startswith("socket."):
+            raise AssertionError(f"Unexpected network operation: {event}")
+        if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
+            if Path(os.fsdecode(args[0])).resolve() == offline_answer:
+                if not scoring:
+                    raise AssertionError("Held-out answers were opened before scoring.")
+                answer_reads.append("score")
+
+    sys.addaudithook(audit)
+    try:
+        if initial_results is None:
+            try:
+                reflection.run(data, work / "initial", None, review_rounds=0, **setting)
+            finally:
+                for call in model.calls:
+                    call["arm"] = "initial"
+            initial_results = work / "initial" / "norethink" / RESULT
+        initial = score_benchmark.read_arm(initial_results, "norethink")
+        initial_rows = score_benchmark.index_cases(initial, "initial")
+        expected_ids = {case["id"] for case in dataset["cases"]}
+        if initial_rows.keys() != expected_ids:
+            raise ValueError("The initial results do not cover the selected cases.")
+        frozen = reflection.fingerprint(initial)
+        initial_hash = digest(initial_results)
+        result.update(initial=str(initial_results), initial_sha256=initial_hash)
+        arms = {}
+        for arm, requires_request in ARMS:
+            start = len(model.calls)
+            try:
+                reflection.run(
+                    data, work / arm, seed_path, review_rounds=manifest["review_rounds"],
+                    initial_results=initial_results, guard_review=True,
+                    require_request_feature=requires_request, **setting,
+                )
+            finally:
+                for call in model.calls[start:]:
+                    call["arm"] = arm
+            reviewed = score_benchmark.read_arm(work / arm / "rethink" / RESULT, "rethink")
+            if reviewed["initial_fingerprint"] != frozen:
+                raise ValueError("The review arm did not reuse the shared frozen initial decisions.")
+            rows = score_benchmark.index_cases(reviewed, "review", guarded=True)
+            if rows.keys() != initial_rows.keys():
+                raise ValueError("The review arm does not cover the frozen split.")
+            for case_id, row in rows.items():
+                draft = {field: initial_rows[case_id][field] for field in ("label", "reason")}
+                if row["initial"] != draft:
+                    raise ValueError("A review used a different initial decision.")
+                score_benchmark.check_guard(
+                    case_id, row, draft, row["retrieved_lessons"], reviewed["guard_context_policy"],
+                    require_request_feature=requires_request,
+                )
+            arms[arm] = rows
+        if digest(initial_results) != initial_hash or digest(seed_path) != seed_hash:
+            raise ValueError("The frozen inputs changed during the comparison.")
+        scoring = True
+        references = frozen_file(manifest, "offline/answers.json")
+        paired = {}
+        totals = {arm: {"correct": 0, "improved": 0, "degraded": 0, "unchanged": 0} for arm in arms}
+        for case_id, draft in initial_rows.items():
+            expected = references[case_id]
+            paired[case_id] = {"initial_label": draft["label"], "reference": expected}
+            for arm, rows in arms.items():
+                row = rows[case_id]
+                correct = row["label"] == expected
+                change = reflection.compare(draft["label"] == expected, correct)
+                totals[arm]["correct"] += correct
+                totals[arm][change] += 1
+                paired[case_id][arm] = {
+                    "final_label": row["label"], "stop_reason": row["stop_reason"], "outcome": change,
+                    "sent_seed_case_ids": [item["case_id"] for item in row["sent_lessons"]],
+                }
+        result.update(passed=True, cases=paired, metrics=totals)
+    except (ValueError, ModelError, OSError) as error:
+        result["error"] = str(error)
+    finally:
+        auditing = False
+    result["answer_reads"] = answer_reads
+    result["requests"] = len(model.calls)
+    result["cost_by_arm"] = {}
+    for arm in ("initial", *(name for name, _ in ARMS)):
+        matching = [call for call in model.calls if call["arm"] == arm]
+        result["cost_by_arm"][arm] = {
+            "requests": len(matching),
+            "observed_tokens": sum(call["usage"].get("total_tokens", 0) for call in matching),
+        }
+    result["calls_without_usage"] = sum("total_tokens" not in call["usage"] for call in model.calls)
+    result["observed_tokens"] = sum(call["usage"].get("total_tokens", 0) for call in model.calls)
+    write(work / "comparison.json", result)
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--live", action="store_true", help="call the personal gateway within the supplied total budget")
+    mode.add_argument("--fixture", action="store_true", help="run against in-process streaming replies")
+    parser.add_argument("--case-id", action="append", required=True, help="frozen held-out case ID, repeat as needed")
+    parser.add_argument("--max-requests", type=int, help="hard lifetime budget for a live comparison")
+    parser.add_argument("--out-dir", type=Path, help="new directory for a fixture or live comparison")
+    parser.add_argument("--initial-results", type=Path, help="reuse matching frozen initials from this runner")
+    args = parser.parse_args()
+    try:
+        manifest = scene_io.read_json(ROOT / "manifest.json")
+        dataset, lessons = prepare(manifest, args.case_id)
+        plan = request_bound(dataset, lessons, manifest["review_rounds"], reuse_initial=args.initial_results is not None)
+        if not (args.live or args.fixture):
+            print(json.dumps({"mode": "request_plan", "case_ids": args.case_id, **plan}, indent=2))
+            return 0
+        if args.out_dir is None:
+            parser.error("--out-dir is required for a comparison.")
+        out = args.out_dir.resolve()
+        if out.exists() or out.is_relative_to(ROOT):
+            parser.error("Choose a new run directory outside the frozen data package.")
+        if os.name == "nt" and out.drive.lower().startswith(("\\\\wsl.localhost", "\\\\wsl$")):
+            parser.error("Choose a Windows-local output directory for the SQLite seed.")
+        if args.live and (args.max_requests is None or args.max_requests < plan["max_requests"]):
+            parser.error(f"Choose a run budget of at least {plan['max_requests']} requests for the selected comparison.")
+        cap = min(args.max_requests, plan["max_requests"]) if args.max_requests is not None else plan["max_requests"]
+        if args.live:
+            config = ModelClient.from_env()
+            opener = None
+        else:
+            config = ModelClient("https://offline.invalid/v1/chat/completions", "request-policy-fixture", "fixture")
+            opener = fixture_factory
+        model = PersonalStreamClient(config, max_requests=cap, initial_cap=INITIAL_CAP, review_cap=REVIEW_CAP,
+                                     opener_factory=opener)
+        report = run(out, manifest, dataset, lessons, model, plan, live=args.live,
+                     initial_results=args.initial_results.resolve() if args.initial_results else None)
+        print(json.dumps({"result": str(out / "comparison.json"), "passed": report["passed"],
+                          "requests": report["requests"], "observed_tokens": report["observed_tokens"],
+                          "metrics": report.get("metrics"), "error": report.get("error")}, ensure_ascii=True))
+        return 0 if report["passed"] else 1
+    except (OSError, ValueError, ModelError, KeyError, sqlite3.Error) as error:
+        parser.exit(1, f"{error}\n")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

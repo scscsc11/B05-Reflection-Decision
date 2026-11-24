@@ -29,7 +29,7 @@ python3 -B -m unittest -v \
   tests.test_io.IoTests.test_fixture_leaves_existing_output_untouched
 ```
 
-本地交付验收通过 33 项测试，覆盖以上用例。结构检查采用合成文件，反思与评分验收采用进程内替身。民用工单的冻结数据和分阶段复跑入口见[民用盲测资产](../experiments/support_tickets_v1/README.md)。
+本地交付验收通过 34 项测试，覆盖以上用例。结构检查采用合成文件，反思与评分验收采用进程内替身。民用工单的冻结数据和分阶段复跑入口见[民用盲测资产](../experiments/support_tickets_v1/README.md)。
 
 ## 正式联调准入
 

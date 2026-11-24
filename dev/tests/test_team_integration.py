@@ -263,6 +263,40 @@ class TeamIntegrationTests(unittest.TestCase):
                 initial_results=paths["initial"], checkpoint=checkpoint, in_process_model=model,
             )
 
+    def test_personal_stream_profile_pins_frozen_initials(self):
+        run_blind_trial(self.work)
+        inputs = self.work / "heldout_input"
+        first = ScriptedModel(["A", "C", "A"])
+        profile = {"stream": True, "output_token_caps": {"initial": 96, "review": 160}, "max_requests": 9}
+        first.profile = profile
+        initial_out = self.work / "personal_initial"
+        reflection.run(inputs, initial_out, None, blind=True, review_rounds=0, personal_model=first)
+        initial_path = initial_out / "norethink" / RESULT
+        initial = scene_io.read_json(initial_path)
+        self.assertEqual(initial["gateway"], "personal_gateway")
+        self.assertEqual(initial["model_profile"], profile)
+
+        resumed = ScriptedModel(["A", "C", "A"])
+        resumed.profile = profile | {"max_requests": 3}
+        target = self.work / "personal_review"
+        reflection.run(
+            inputs, target, None, blind=True, use_history=False, review_rounds=2,
+            initial_results=initial_path, personal_model=resumed,
+        )
+        result = scene_io.read_json(target / "rethink" / RESULT)
+        self.assertEqual(result["initial_fingerprint"], reflection.fingerprint(initial))
+        self.assertEqual(result["model_fingerprint"], initial["model_fingerprint"])
+        self.assertEqual(result["summary"]["model_calls"], 3)
+
+        different = ScriptedModel([])
+        different.profile = profile | {"output_token_caps": {"initial": 96, "review": 128}}
+        with self.assertRaisesRegex(ValueError, "same cases and gateway"):
+            reflection.run(
+                inputs, self.work / "different_profile", None, blind=True, use_history=False,
+                initial_results=initial_path, personal_model=different,
+            )
+        self.assertEqual(different.requests, [])
+
     def test_resume_keeps_completed_blind_rounds(self):
         paths = run_blind_trial(self.work)
         inputs = self.work / "heldout_input"

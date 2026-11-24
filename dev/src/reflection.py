@@ -514,8 +514,11 @@ def run(
     time_budget: float = 180.0, checkpoint: Path | None = None,
     blind: bool = False, initial_results: Path | None = None, guard_review: bool = False,
     require_request_feature: bool = False, in_process_model: ModelClient | None = None,
+    personal_model: ModelClient | None = None,
 ) -> None:
-    """Run the benchmark using the configured gateway or an injected in-process test double."""
+    """Run the campus-ticket benchmark with the selected model client."""
+    if personal_model is not None and (simulated or in_process_model is not None):
+        raise ValueError("Select only one gateway source.")
     if not 0 <= review_rounds <= 5:
         raise ValueError("--review-rounds must be between 0 and 5.")
     if not math.isfinite(time_budget) or time_budget <= 0:
@@ -545,7 +548,9 @@ def run(
         if knowledge_db is not None and checkpoint == knowledge_db.resolve():
             raise ValueError("--checkpoint requires a path distinct from the knowledge database.")
 
-    if in_process_model is None:
+    if personal_model is not None:
+        model, source = personal_model, "personal_gateway"
+    elif in_process_model is None:
         model = ModelClient.from_env()
         source = "simulated_gateway" if simulated else "configured_gateway"
     else:
@@ -553,12 +558,19 @@ def run(
         source = "in_process_stub"
     scope = fingerprint([TASK, domain, labels, source])
     meta = {"task": TASK, "domain": domain, "gateway": source, "model": model.model}
+    if personal_model is not None:
+        meta["model_profile"] = model.profile
     frozen_initials = {}
     if blind:
+        model_identity = [model.endpoint, model.model, model.use_json_schema, model.timeout]
+        if personal_model is not None:
+            model_identity.append({
+                key: value for key, value in meta["model_profile"].items() if key != "max_requests"
+            })
         meta.update(
             blind=True, labels=sorted(labels), review_round_limit=review_rounds, time_budget_seconds=time_budget,
             benchmark_fingerprint=fingerprint([domain, labels, cases]),
-            model_fingerprint=fingerprint([model.endpoint, model.model, model.use_json_schema, model.timeout]),
+            model_fingerprint=fingerprint(model_identity),
         )
         if review_rounds:
             meta["blind_review_policy"] = BLIND_REVIEW_POLICY
@@ -593,6 +605,8 @@ def run(
                 ]
                 if blind:
                     signature_inputs.extend(["blind-v1", meta.get("initial_fingerprint")])
+                if personal_model is not None:
+                    signature_inputs.append(meta["model_profile"])
                 if db is not None:
                     signature_inputs.append(experience_store.PROVENANCE_SCHEMA)
                 if review_rounds and any(case["id"] not in answers for case in cases):
