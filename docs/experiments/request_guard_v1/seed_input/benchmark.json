@@ -1,0 +1,60 @@
+{
+  "domain": "campus-support-request-conditions-synthetic",
+  "labels": {
+    "account": "账户登录、身份验证和账户权限",
+    "materials": "课程资料、课件和课程阅读文件",
+    "schedule": "上课时间、教室和排课通知",
+    "other": "不属于上述类别的校园服务问题"
+  },
+  "cases": [
+    {
+      "id": "req-s01",
+      "topic": "field-workshop-helpdesk",
+      "text": "我是刚加入校园植物记录课的学员。帮助台的页面提示我的学生账号仍属于旁听组，表单只能查看。请核对课程名单，给我的账号补上提交权限。",
+      "features": [
+        "help-desk",
+        "new-enrollment"
+      ]
+    },
+    {
+      "id": "req-s02",
+      "topic": "media-class-room-change",
+      "text": "数字叙事课临时换教室。通知写的是图书馆研讨区，但预约页还显示综合楼。请确认今天的数字叙事课程在哪个房间。",
+      "features": [
+        "library-studio",
+        "request:confirm-location",
+        "room-change"
+      ]
+    },
+    {
+      "id": "req-s03",
+      "topic": "course-reading-bulletin",
+      "text": "我可以打开课程公告和阅读清单，但新加入小组后，阅读附件对我的学生账号显示无权限。同组同学可以浏览，请恢复我在课程中的阅读权限。",
+      "features": [
+        "class-bulletin",
+        "reading-list",
+        "request:restore-access"
+      ]
+    },
+    {
+      "id": "req-s04",
+      "topic": "course-reading-bulletin",
+      "text": "课程公告的阅读清单可以正常查看。清单第六项只有一个失效的旧文件链接，全班都打不开。请老师替换成能访问的阅读文件。",
+      "features": [
+        "class-bulletin",
+        "reading-list",
+        "request:restore-access"
+      ]
+    },
+    {
+      "id": "req-s05",
+      "topic": "course-handout-terminal",
+      "text": "我在校内讲义终端已经打开课程页，系统却将我当作访客，无法访问任何课件。请把我的校园账号恢复为本班学员身份。",
+      "features": [
+        "handout-terminal",
+        "onsite",
+        "request:restore-access"
+      ]
+    }
+  ]
+}

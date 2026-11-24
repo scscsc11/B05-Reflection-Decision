@@ -1,0 +1,40 @@
+{
+  "task": "support-tickets",
+  "source": "由模型编制的虚构校园服务工单，复用原基准四个类别定义",
+  "base_commit": "d206c8c9750bfe51731fd774996971ed3ad3d52b",
+  "domain": "campus-support-r2-synthetic",
+  "seed_cases": 8,
+  "heldout_cases": 24,
+  "heldout_label_counts": {
+    "account": 6,
+    "materials": 6,
+    "other": 6,
+    "schedule": 6
+  },
+  "id_rule": "r2- + first 12 hexadecimal digits of sha256(case text in UTF-8), sorted by ID",
+  "review_rounds": 2,
+  "time_budget_seconds": 600,
+  "time_budget_scope": "per stage, across all cases",
+  "stages": [
+    "seed",
+    "initial",
+    "without_history",
+    "with_history",
+    "guarded",
+    "score"
+  ],
+  "sha256": {
+    "heldout_input/benchmark.json": "2b742e1f308c066f2d14336262617c25914cd7b22ad396225b8da5fdab852bd9",
+    "offline/answers.json": "736fa4ceb1597a77ecc17e96c90097b475205d232fa06c85ffcac764a04c3f8b",
+    "offline/label_rationales.json": "50b2473a4412ce3e0edff49f9b6210f588bed86952b4f1c79c44083ae63bc608",
+    "seed_input/answers.json": "b31445919f5cb000d3ff213dda9e9acefbc690380a8a7df63bc61c69b25cea62",
+    "seed_input/benchmark.json": "87af21c5df802873eecab7a05d97daf2d7b00755ba5430634ae8c8498d17ee94",
+    "offline/label_audit.json": "1a79d68b2511a5ed9634d2ae64f655a99e06e658824bd4837cf3504459917050"
+  },
+  "largest_character_similarity": {
+    "ratio": 0.32075471698113206,
+    "id1": "r2-b1a9365e06b9",
+    "id2": "r2-27a3820e80f5"
+  },
+  "source_manifest_sha256": "4b132cd810970784dcbc377c52be7cb7a1b3ea7d1c5eb26c8ef9680d7d6c3aa6"
+}

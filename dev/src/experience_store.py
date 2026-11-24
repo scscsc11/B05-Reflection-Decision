@@ -6,11 +6,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 RETRIEVAL_POLICY = "knowledge-applicability-v2"
+PROVENANCE_SCHEMA = "knowledge-provenance-v1"
 
 FIELDS = (
     "task", "domain", "topic", "conditions", "case_label", "problem", "lesson",
     "applies_when", "status", "expected_label", "source",
 )
+
+
+def has_provenance(db: sqlite3.Connection) -> bool:
+    return any(row[1] == "provenance" for row in db.execute("PRAGMA table_info(knowledge_versions)"))
+
+
+def decode_lesson(row: sqlite3.Row) -> dict:
+    record = dict(row)
+    lesson = {key: record[key] for key in ("case_id", "revision", *FIELDS)}
+    lesson["conditions"] = json.loads(lesson["conditions"])
+    provenance = record.get("provenance")
+    if provenance is not None:
+        lesson["provenance"] = json.loads(provenance)
+    return lesson
 
 
 def open_store(path: Path) -> sqlite3.Connection:
@@ -19,6 +34,7 @@ def open_store(path: Path) -> sqlite3.Connection:
     db.row_factory = sqlite3.Row
     try:
         with db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS knowledge_versions (
                     scope TEXT NOT NULL,
@@ -36,13 +52,19 @@ def open_store(path: Path) -> sqlite3.Connection:
                     expected_label TEXT,
                     source TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    provenance TEXT,
                     PRIMARY KEY (scope, case_id, revision)
                 )
             """)
+            if not has_provenance(db):
+                db.execute("ALTER TABLE knowledge_versions ADD COLUMN provenance TEXT")
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons'").fetchone():
                 # Keep old scopes and provenance separate from new experiments.
                 db.execute("""
-                    INSERT OR IGNORE INTO knowledge_versions
+                    INSERT OR IGNORE INTO knowledge_versions (
+                        scope, case_id, revision, task, domain, topic, conditions, case_label,
+                        problem, lesson, applies_when, status, expected_label, source, updated_at
+                    )
                     SELECT scope, case_id, revision, 'legacy', '', topic, '[]', label,
                            '', lesson, '', 'unverified', NULL, 'legacy', updated_at
                     FROM lessons
@@ -55,9 +77,28 @@ def open_store(path: Path) -> sqlite3.Connection:
 
 def plan_lesson(current: dict | None, entry: dict) -> dict:
     """Compute the revision of an update against the current knowledge snapshot."""
+    provenance = entry.get("provenance")
+    if provenance is not None:
+        if (
+            not isinstance(provenance, dict)
+            or provenance.keys() != {"initial_label", "source_round", "selected_round", "final_label"}
+            or any(not isinstance(provenance[key], str) or not provenance[key].strip()
+                   for key in ("initial_label", "final_label"))
+            or type(provenance["source_round"]) is not int or provenance["source_round"] < 1
+            or type(provenance["selected_round"]) is not int or provenance["selected_round"] < 0
+        ):
+            raise ValueError("Invalid review provenance.")
+        selected_round = provenance["selected_round"]
+        final_label = provenance["final_label"]
+        if (
+            (selected_round == 0 and final_label != provenance["initial_label"])
+            or (selected_round == provenance["source_round"] and final_label != entry["case_label"])
+        ):
+            raise ValueError("Review provenance conflicts with the selected decision.")
     if current is None:
         return {"action": "inserted", "revision": 1, "status": entry["status"]}
-    same = all(
+    same_provenance = provenance is None or current.get("provenance") == provenance
+    same = same_provenance and all(
         set(current[key]) == set(entry[key]) if key == "conditions" else current[key] == entry[key]
         for key in FIELDS
     )
@@ -75,29 +116,31 @@ def save_lesson(db: sqlite3.Connection, scope: str, case_id: str, entry: dict) -
         WHERE scope = ? AND case_id = ?
         ORDER BY revision DESC LIMIT 1
     """, (scope, case_id)).fetchone()
-    current = dict(row) | {"conditions": json.loads(row["conditions"])} if row is not None else None
+    current = decode_lesson(row) if row is not None else None
     update = plan_lesson(current, entry)
     if update["action"] == "unchanged":
         return update
 
     payload = {key: entry[key] for key in FIELDS}
     payload["conditions"] = json.dumps(sorted(set(payload["conditions"])), ensure_ascii=False)
+    provenance = entry.get("provenance")
     db.execute("""
         INSERT INTO knowledge_versions (
             scope, case_id, revision, task, domain, topic, conditions, case_label, problem,
-            lesson, applies_when, status, expected_label, source, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            lesson, applies_when, status, expected_label, source, updated_at, provenance
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         scope, case_id, update["revision"], *(payload[key] for key in FIELDS),
         datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        json.dumps(provenance, ensure_ascii=False, sort_keys=True) if provenance is not None else None,
     ))
     return update
 
 
 def latest_lessons(db: sqlite3.Connection, scope: str) -> list[dict]:
+    # The decoder handles seeds created before provenance was stored.
     rows = db.execute("""
-        SELECT k.case_id, k.revision, k.task, k.domain, k.topic, k.conditions, k.case_label,
-               k.problem, k.lesson, k.applies_when, k.status, k.expected_label, k.source
+        SELECT k.*
         FROM knowledge_versions AS k
         JOIN (
             SELECT scope, case_id, MAX(revision) AS revision
@@ -105,7 +148,7 @@ def latest_lessons(db: sqlite3.Connection, scope: str) -> list[dict]:
         ) AS latest USING (scope, case_id, revision)
         ORDER BY k.updated_at DESC, k.case_id
     """, (scope,))
-    return [dict(row) | {"conditions": json.loads(row["conditions"])} for row in rows]
+    return [decode_lesson(row) for row in rows]
 
 
 def detect_conflicts(lessons: list[dict]) -> list[dict]:

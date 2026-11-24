@@ -1,4 +1,4 @@
-"""Feedback-driven reflection on the non-combat campus-support benchmark."""
+"""Multi-round reflection on the non-combat campus-support benchmark."""
 
 import hashlib
 import json
@@ -7,7 +7,7 @@ import math
 import os
 import sqlite3
 import tempfile
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import ExitStack, closing
 from pathlib import Path
 from time import perf_counter, sleep
@@ -22,6 +22,9 @@ else:
 
 TASK = "support-tickets"
 GUARD_CONTEXT_POLICY = "verified_labels_only"
+GUARD_REQUEST_POLICY = "exact_match_with_request_feature"
+REQUEST_FEATURE_PREFIX = "request:"
+BLIND_REVIEW_POLICY = "majority_vote_v1"
 logger = logging.getLogger(__name__)
 INITIAL = (
     "Classify the campus service ticket using the provided labels. "
@@ -32,6 +35,12 @@ REVIEW = (
     "The feedback reports correctness and labels already ruled out without supplying the answer. Treat prior lessons as evidence of "
     "limited scope. A verified record means its source categorization matched a reference, not that its "
     "advice generalizes. Explain the review and extract a concise problem, practical advice and conditions."
+)
+BLIND_REVIEW = (
+    "Reassess the previous campus service ticket decision using the ticket and category descriptions. "
+    "There is no evaluated feedback. Check the previous reason against the ticket and use any "
+    "applicable prior lessons as evidence from other cases. Explain why you keep or change the "
+    "label and extract a concise problem, practical advice and conditions."
 )
 TEXT = {"type": "string"}
 KNOWLEDGE = {
@@ -99,13 +108,15 @@ def decide(model: ModelClient, stage: str, instructions: str, labels: dict[str, 
            case: dict, properties: dict, calls: list[dict], deadline: float, **context) -> dict:
     fields = {"label": {"type": "string", "enum": list(labels)}, **properties}
     schema = {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
-    # Reference labels live only in the evaluator. The model sees the categorical feedback.
+    # The feedback protocol sends verdicts. The blind protocol passes an empty feedback record.
     data = {"stage": stage, "case": case, "labels": labels, **context}
     for attempt in (1, 2):
         started = perf_counter()
         remaining = deadline - started
         if remaining <= 0:
             raise ModelError(f"Case {case['id']!r}, {stage}: model-call budget exhausted.")
+        call = {"case_id": case["id"], "stage": stage, "round": context.get("round", 0), "attempt": attempt}
+        logger.info("Model call started %s", json.dumps(call, ensure_ascii=True))
         ok = False
         try:
             reply = model.complete(stage, instructions, data, schema, budget=remaining)
@@ -130,11 +141,12 @@ def decide(model: ModelClient, stage: str, instructions: str, labels: dict[str, 
             if attempt == 2 or delay is None or delay >= deadline - perf_counter():
                 raise ModelError(f"Case {case['id']!r}, {stage}: {exc}") from None
         finally:
-            elapsed = perf_counter() - started
-            calls.append({"stage": stage, "round": context.get("round", 0), "attempt": attempt,
-                          "seconds": elapsed, "ok": ok})
-            logger.info("Model call case=%r stage=%s round=%s attempt=%d time=%.3fs ok=%s.",
-                        case["id"], stage, context.get("round", 0), attempt, elapsed, ok)
+            completed = {
+                "stage": stage, "round": call["round"], "attempt": attempt,
+                "seconds": perf_counter() - started, "ok": ok,
+            }
+            calls.append(completed)
+            logger.info("Model call finished %s", json.dumps(call | completed, ensure_ascii=True))
         logger.info("Retrying case=%r stage=%s in %.3fs.", case["id"], stage, delay)
         sleep(delay)
 
@@ -147,7 +159,22 @@ def compare(initial_correct: bool | None, candidate_correct: bool | None) -> str
     return "improved" if candidate_correct else "degraded"
 
 
-def verified_review_gate(case: dict, labels: dict[str, str], draft: dict, history: list[dict]) -> dict:
+def has_unique_request_feature(features: object) -> bool:
+    if not isinstance(features, list) or any(not isinstance(feature, str) for feature in features):
+        return False
+    return sum(
+        feature.startswith(REQUEST_FEATURE_PREFIX) and bool(feature.removeprefix(REQUEST_FEATURE_PREFIX).strip())
+        for feature in features
+    ) == 1
+
+
+def verified_review_gate(
+    case: dict, labels: dict[str, str], draft: dict, history: list[dict], *, require_request_feature: bool = False,
+) -> dict:
+    if require_request_feature and not has_unique_request_feature(case["features"]):
+        return {
+            "action": "skipped", "reason": "no_unique_request_feature", "supported_label": None, "case_ids": [],
+        }
     matches = [
         item for item in history
         if item["status"] == "verified" and case["features"]
@@ -182,74 +209,163 @@ def guarded_prompt_lessons(history: list[dict], gate: dict) -> list[dict]:
     ]
 
 
-def review_case(
-    model: ModelClient, labels: dict[str, str], case: dict, draft: dict, expected: str | None,
-    history: list[dict], calls: list[dict], deadline: float, limit: int, *, guard_review: bool = False,
+def request_review(
+    model: ModelClient, labels: dict[str, str], case: dict, draft: dict, previous: dict,
+    history: list[dict], calls: list[dict], deadline: float, number: int, *, feedback: dict | None = None,
 ) -> dict:
-    gate = verified_review_gate(case, labels, draft, history) if guard_review else None
-    if gate is not None and gate["action"] == "skipped":
-        return {
-            "label": draft["label"], "selected_round": 0, "correct": None, "expected_label": None,
-            "comparison": "unverified", "changed": False, "stop": gate["reason"], "rounds": [],
-            "review_gate": gate, "sent_lessons": [],
-        }
-    sent_lessons = guarded_prompt_lessons(history, gate) if gate is not None else history
-    initial_correct = draft["label"] == expected if expected is not None else None
+    instructions = BLIND_REVIEW if feedback is None else REVIEW
+    # Keep the request shape shared by the client and the scripted gateway.
+    if feedback is None:
+        feedback = {"correct": None, "incorrect_labels": []}
+    return decide(
+        model, "review", instructions, labels, case, {"review": TEXT, "knowledge": KNOWLEDGE},
+        calls, deadline, round=number, preliminary=draft,
+        previous={"label": previous["label"], "reason": previous.get("reason", previous.get("review"))},
+        feedback=feedback, prior_lessons=history,
+    )
+
+
+def review_with_feedback(
+    model: ModelClient, labels: dict[str, str], case: dict, draft: dict, expected: str,
+    history: list[dict], calls: list[dict], deadline: float, limit: int,
+) -> dict:
+    initial_correct = draft["label"] == expected
     selected_correct = previous_correct = initial_correct
-    selected = previous = draft
+    selected_label = draft["label"]
+    previous = draft
     selected_round = 0
     seen = {draft["label"]}
-    incorrect = {draft["label"]} if initial_correct is False else set()
+    incorrect = {draft["label"]} if not initial_correct else set()
     rounds = []
     stop = "round_limit"
     for number in range(1, limit + 1):
-        candidate = decide(
-            model, "review", REVIEW, labels, case, {"review": TEXT, "knowledge": KNOWLEDGE},
-            calls, deadline, round=number, preliminary=draft,
-            previous={"label": previous["label"], "reason": previous.get("reason", previous.get("review"))},
+        candidate = request_review(
+            model, labels, case, draft, previous, history, calls, deadline, number,
             feedback={"correct": previous_correct, "incorrect_labels": sorted(incorrect)},
-            prior_lessons=sent_lessons,
         )
-        correct = candidate["label"] == expected if expected is not None else None
+        label = candidate["label"]
+        correct = label == expected
         rounds.append({
             **candidate, "round": number, "correct": correct,
             "comparison": compare(initial_correct, correct),
         })
-        if selected_correct is not True or correct is True:
-            selected, selected_correct, selected_round = candidate, correct, number
-        if correct is True:
+        if not selected_correct or correct:
+            selected_label, selected_correct, selected_round = label, correct, number
+        if correct:
             stop = "verified_result"
             break
-        if correct is None:
-            stop = "no_reference"
-            break
-        if selected_correct is True:
+        if selected_correct:
             stop = "kept_verified_initial"
             break
-        if candidate["label"] in seen:
+        if label in seen:
             stop = "repeated_label"
             break
-        seen.add(candidate["label"])
-        incorrect.add(candidate["label"])
+        seen.add(label)
+        incorrect.add(label)
         previous, previous_correct = candidate, correct
 
-    if gate is not None:
-        if selected["label"] == gate["supported_label"]:
-            gate["action"] = "accepted"
-        else:
-            gate["action"] = "kept_initial"
-            gate["reason"] = "proposal_does_not_match_verified_history"
-            selected, selected_correct, selected_round = draft, initial_correct, 0
-            stop = "guard_rejected_proposal"
-
-    result = {
-        "label": selected["label"], "selected_round": selected_round, "correct": selected_correct,
-        "expected_label": expected, "comparison": compare(initial_correct, selected_correct),
-        "changed": selected["label"] != draft["label"], "stop": stop, "rounds": rounds,
-        "sent_lessons": sent_lessons if rounds else [],
+    return {
+        "label": selected_label, "selected_round": selected_round, "correct": selected_correct,
+        "stop_reason": stop, "rounds": rounds, "selection": {"policy": "reference_feedback"},
     }
+
+
+def review_without_reference(
+    model: ModelClient, labels: dict[str, str], case: dict, draft: dict,
+    history: list[dict], calls: list[dict], deadline: float, limit: int,
+) -> dict:
+    initial_label = draft["label"]
+    previous = draft
+    counts = Counter([initial_label])
+    rounds = []
+    stop = "round_limit"
+    for number in range(1, limit + 1):
+        candidate = request_review(model, labels, case, draft, previous, history, calls, deadline, number)
+        label = candidate["label"]
+        rounds.append({**candidate, "round": number, "correct": None, "comparison": "unverified"})
+        counts[label] += 1
+        if label == previous["label"]:
+            stop = "converged"
+            break
+        if counts[label] > 1:
+            stop = "cycle_detected"
+            break
+        previous = candidate
+
+    winner, frequency = counts.most_common(1)[0]
+    tied = sum(count == frequency for count in counts.values()) > 1
+    label = initial_label if tied else winner
+    selected_round = 0
+    if label != initial_label:
+        selected_round = next(row["round"] for row in reversed(rounds) if row["label"] == label)
+    return {
+        "label": label, "selected_round": selected_round, "correct": None,
+        "stop_reason": stop, "rounds": rounds,
+        "selection": {
+            "policy": BLIND_REVIEW_POLICY, "label_counts": dict(counts), "voted_label": label,
+            "reason": "initial_on_tie" if tied else "most_frequent",
+        },
+    }
+
+
+def review_case(
+    model: ModelClient, labels: dict[str, str], case: dict, draft: dict, expected: str | None,
+    history: list[dict], calls: list[dict], deadline: float, limit: int, *, guard_review: bool = False,
+    require_request_feature: bool = False,
+) -> dict:
+    gate = None
+    if guard_review:
+        gate = verified_review_gate(case, labels, draft, history, require_request_feature=require_request_feature)
+    sent_lessons = guarded_prompt_lessons(history, gate) if gate is not None else history
+    initial_correct = draft["label"] == expected if expected is not None else None
+    if gate is not None and gate["action"] == "skipped":
+        result = {
+            "label": draft["label"], "selected_round": 0, "correct": initial_correct,
+            "stop_reason": gate["reason"], "rounds": [],
+            "selection": {"policy": "verified_history_guard", "reason": gate["reason"]},
+        }
+    elif expected is None:
+        result = review_without_reference(model, labels, case, draft, sent_lessons, calls, deadline, limit)
+    else:
+        result = review_with_feedback(model, labels, case, draft, expected, sent_lessons, calls, deadline, limit)
+
+    stop = result["stop_reason"]
     if gate is not None:
+        if gate["action"] == "review":
+            if result["label"] == gate["supported_label"]:
+                gate["action"] = "accepted"
+            else:
+                gate["action"] = "kept_initial"
+                gate["reason"] = "proposal_does_not_match_verified_history"
+                result.update(label=draft["label"], selected_round=0, correct=initial_correct)
+                stop = "guard_rejected_proposal"
         result["review_gate"] = gate
+
+    return result | {
+        "expected_label": expected, "feedback_available": expected is not None,
+        "comparison": compare(initial_correct, result["correct"]), "changed": result["label"] != draft["label"],
+        "stop": stop, "sent_lessons": sent_lessons if result["rounds"] else [],
+    }
+
+
+def audit_case(row: dict, initial_label: str) -> dict:
+    rounds = row.get("rounds", [])
+    sent = row.get("sent_lessons", [])
+    result = row | {
+        "initial_label": initial_label, "final_label": row["label"],
+        "selected_round": row.get("selected_round", 0), "review_rounds": len(rounds), "rounds": rounds,
+        "stop_reason": row.get("stop_reason", row.get("stop", "initial_only")),
+        "model_calls": len(row["calls"]), "model_seconds": sum((call["seconds"] for call in row["calls"]), 0.0),
+        "retrieved_lessons": row.get("retrieved_lessons", []), "sent_lessons": sent,
+        "knowledge_version": {lesson["case_id"]: lesson["revision"] for lesson in sent},
+        "feedback_available": row.get("expected_label") is not None,
+    }
+    if row.get("knowledge") is not None:
+        source_round = row["knowledge_round"]
+        result["knowledge"] = row["knowledge"] | {
+            "source_round": source_round, "initial_label": initial_label,
+            "from_selected_round": source_round == row["selected_round"],
+        }
     return result
 
 
@@ -268,7 +384,9 @@ def fingerprint(value) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def load_checkpoint(path: Path, signature: str, ids: list[str], reviews_enabled: bool) -> list[dict]:
+def load_checkpoint(
+    path: Path, signature: str, ids: list[str], reviews_enabled: bool, *, blind: bool = False,
+) -> list[dict]:
     if not path.exists():
         return []
     data = scene_io.read_json(path)
@@ -291,6 +409,10 @@ def load_checkpoint(path: Path, signature: str, ids: list[str], reviews_enabled:
                 raise ValueError
         except (TypeError, KeyError, ValueError):
             raise ValueError("Checkpoint case sequence is invalid.") from None
+        if blind:
+            validate_blind_decision(record["initial"], expected_id)
+            if review is not None:
+                validate_blind_decision(review, expected_id)
     return records
 
 
@@ -316,6 +438,24 @@ def stage_knowledge(known: OrderedDict, case_id: str, entry: dict) -> dict:
 
 
 BLIND_IDENTITY = ("task", "domain", "gateway", "model", "benchmark_fingerprint", "model_fingerprint", "labels")
+
+
+def validate_blind_decision(row: dict, case_id: str) -> None:
+    rounds = row.get("rounds", [])
+    if not isinstance(rounds, list) or any(not isinstance(attempt, dict) for attempt in rounds):
+        raise ValueError(f"{case_id!r}: invalid review rounds.")
+    decisions = [row, *rounds]
+    knowledge = row.get("knowledge")
+    if knowledge is not None:
+        if not isinstance(knowledge, dict) or knowledge.get("status") != "unverified":
+            raise ValueError(f"{case_id!r}: blind knowledge must be unverified.")
+        decisions.append(knowledge)
+    if any(
+        item.get("correct") is not None or item.get("expected_label") is not None
+        or item.get("feedback_available", False) is not False
+        for item in decisions
+    ):
+        raise ValueError(f"{case_id!r}: run contains an in-process score or reference label.")
 
 
 def validate_blind_calls(calls: object, stage: str, case_id: str) -> None:
@@ -347,10 +487,10 @@ def reuse_blind_initials(path: Path, meta: dict, cases: list[dict]) -> tuple[dic
         if (
             not isinstance(row, dict) or row.get("id") != case["id"]
             or not isinstance(row.get("label"), str) or row["label"] not in meta["labels"]
-            or row.get("correct") is not None or row.get("expected_label") is not None
             or not isinstance(row.get("calls"), list) or not row["calls"]
         ):
             raise ValueError(f"Invalid blind initial result for {case['id']!r}.")
+        validate_blind_decision(row, case["id"])
         required_text(row.get("reason"), "initial reason")
         validate_blind_calls(row.get("calls"), "initial", case["id"])
     return {row["id"]: row for row in rows}, fingerprint(source)
@@ -373,13 +513,20 @@ def run(
     *, review_rounds: int = 2, use_history: bool = True, simulated: bool = False,
     time_budget: float = 180.0, checkpoint: Path | None = None,
     blind: bool = False, initial_results: Path | None = None, guard_review: bool = False,
+    require_request_feature: bool = False, in_process_model: ModelClient | None = None,
+    personal_model: ModelClient | None = None,
 ) -> None:
+    """Run the campus-ticket benchmark with the selected model client."""
+    if personal_model is not None and (simulated or in_process_model is not None):
+        raise ValueError("Select only one gateway source.")
     if not 0 <= review_rounds <= 5:
         raise ValueError("--review-rounds must be between 0 and 5.")
     if not math.isfinite(time_budget) or time_budget <= 0:
         raise ValueError("--time-budget must be positive and finite.")
     if guard_review and not (blind and review_rounds and use_history):
         raise ValueError("--guard-review requires blind review with history.")
+    if require_request_feature and not guard_review:
+        raise ValueError("--guard-require-request-feature requires --guard-review.")
     domain, labels, cases = load_benchmark(data_root / "benchmark.json")
     answers = {} if blind else load_answers(data_root / "answers.json", labels)
     scene_io.check_output_dir(data_root, out_dir)
@@ -401,20 +548,37 @@ def run(
         if knowledge_db is not None and checkpoint == knowledge_db.resolve():
             raise ValueError("--checkpoint requires a path distinct from the knowledge database.")
 
-    model = ModelClient.from_env()
-    source = "simulated_gateway" if simulated else "configured_gateway"
+    if personal_model is not None:
+        model, source = personal_model, "personal_gateway"
+    elif in_process_model is None:
+        model = ModelClient.from_env()
+        source = "simulated_gateway" if simulated else "configured_gateway"
+    else:
+        model = in_process_model
+        source = "in_process_stub"
     scope = fingerprint([TASK, domain, labels, source])
     meta = {"task": TASK, "domain": domain, "gateway": source, "model": model.model}
+    if personal_model is not None:
+        meta["model_profile"] = model.profile
     frozen_initials = {}
     if blind:
+        model_identity = [model.endpoint, model.model, model.use_json_schema, model.timeout]
+        if personal_model is not None:
+            model_identity.append({
+                key: value for key, value in meta["model_profile"].items() if key != "max_requests"
+            })
         meta.update(
             blind=True, labels=sorted(labels), review_round_limit=review_rounds, time_budget_seconds=time_budget,
             benchmark_fingerprint=fingerprint([domain, labels, cases]),
-            model_fingerprint=fingerprint([model.endpoint, model.model, model.use_json_schema, model.timeout]),
+            model_fingerprint=fingerprint(model_identity),
         )
+        if review_rounds:
+            meta["blind_review_policy"] = BLIND_REVIEW_POLICY
         if guard_review:
             meta["review_policy"] = "verified_history_guard"
             meta["guard_context_policy"] = GUARD_CONTEXT_POLICY
+        if require_request_feature:
+            meta["guard_match_policy"] = GUARD_REQUEST_POLICY
         if initial_results is not None:
             frozen_initials, digest = reuse_blind_initials(initial_results, meta, cases)
             meta["initial_fingerprint"] = digest
@@ -441,15 +605,26 @@ def run(
                 ]
                 if blind:
                     signature_inputs.extend(["blind-v1", meta.get("initial_fingerprint")])
+                if personal_model is not None:
+                    signature_inputs.append(meta["model_profile"])
+                if db is not None:
+                    signature_inputs.append(experience_store.PROVENANCE_SCHEMA)
+                if review_rounds and any(case["id"] not in answers for case in cases):
+                    # A one-round checkpoint cannot be mixed with results from the vote policy.
+                    signature_inputs.extend([BLIND_REVIEW_POLICY, BLIND_REVIEW])
                 if guard_review:
                     signature_inputs.append(GUARD_CONTEXT_POLICY)
+                if require_request_feature:
+                    signature_inputs.append(GUARD_REQUEST_POLICY)
                 if use_history and review_rounds:
                     signature_inputs.append(experience_store.RETRIEVAL_POLICY)
                 signature = fingerprint(signature_inputs)
-                records = load_checkpoint(checkpoint, signature, [case["id"] for case in cases], bool(review_rounds))
+                records = load_checkpoint(
+                    checkpoint, signature, [case["id"] for case in cases], bool(review_rounds), blind=blind,
+                )
             for previous in records:
                 review = previous["review"]
-                if review is not None and not blind:
+                if review is not None and not blind and review["knowledge"] is not None:
                     update = stage_knowledge(known, review["id"], review["knowledge"])
                     if any(review["knowledge"][key] != value for key, value in update.items()):
                         raise ValueError("Checkpoint revision differs from the current knowledge snapshot.")
@@ -482,13 +657,16 @@ def run(
                         )
                     review = review_case(
                         model, labels, case, draft, expected, history, calls, deadline, review_rounds,
-                        guard_review=guard_review,
+                        guard_review=guard_review, require_request_feature=require_request_feature,
                     )
                     knowledge = None
                     knowledge_round = None
                     action = "not_generated"
-                    if review["rounds"]:
-                        chosen = review["selected_round"] or len(review["rounds"])
+                    chosen = review["selected_round"]
+                    if expected is not None and not chosen:
+                        # The feedback experiment also records the rejected alternative to a verified initial.
+                        chosen = len(review["rounds"])
+                    if chosen:
                         evidence = review["rounds"][chosen - 1]
                         correct = evidence["correct"]
                         status = "unverified" if correct is None else "verified" if correct else "rejected"
@@ -497,7 +675,14 @@ def run(
                             "case_label": evidence["label"], **evidence["knowledge"],
                             "expected_label": expected, "status": status, "source": source,
                         }
-                        update = {"action": "not_saved"} if blind else stage_knowledge(known, case_id, entry)
+                        if blind:
+                            update = {"action": "not_saved"}
+                        else:
+                            entry["provenance"] = {
+                                "initial_label": draft["label"], "source_round": evidence["round"],
+                                "selected_round": review["selected_round"], "final_label": review["label"],
+                            }
+                            update = stage_knowledge(known, case_id, entry)
                         knowledge = entry | update
                         knowledge_round, action = evidence["round"], update["action"]
                     review_record = {
@@ -512,8 +697,11 @@ def run(
                 if checkpoint is not None:
                     write_checkpoint(checkpoint, signature, records)
 
-            initials = [record["initial"] for record in records]
-            reviews = [record["review"] for record in records if record["review"] is not None]
+            initials = [audit_case(record["initial"], record["initial"]["label"]) for record in records]
+            reviews = [
+                audit_case(record["review"], record["initial"]["label"])
+                for record in records if record["review"] is not None
+            ]
             totals = summary(reviews or initials)
             current = summary((reviews or initials)[resumed:])
             meta["execution"] = {
@@ -544,7 +732,8 @@ def run(
                     if experience_store.latest_lessons(db, scope) != baseline:
                         raise ValueError("Knowledge changed during this run. Restart with a new checkpoint.")
                     for review in reviews:
-                        experience_store.save_lesson(db, scope, review["id"], review["knowledge"])
+                        if review["knowledge"] is not None:
+                            experience_store.save_lesson(db, scope, review["id"], review["knowledge"])
                     scene_io.write_results(data_root, out_dir, results, commit=db.commit)
             else:
                 scene_io.write_results(data_root, out_dir, results)

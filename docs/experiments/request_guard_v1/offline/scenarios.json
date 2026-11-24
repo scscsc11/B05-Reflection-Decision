@@ -1,0 +1,110 @@
+{
+  "purpose": "合成民用工单，用脚本化初判和复核响应核验两种条件复核规则。比较结果反映门控行为。",
+  "cases": {
+    "req-h01": {
+      "role": "coarse_misleading",
+      "initial_label": "schedule",
+      "seed_label": "account",
+      "baseline": {
+        "trigger": true,
+        "final_label": "account",
+        "comparison": "degraded"
+      },
+      "request_required": {
+        "trigger": false,
+        "final_label": "schedule",
+        "comparison": "unchanged"
+      }
+    },
+    "req-h02": {
+      "role": "coarse_useful_but_blocked",
+      "initial_label": "other",
+      "seed_label": "account",
+      "baseline": {
+        "trigger": true,
+        "final_label": "account",
+        "comparison": "improved"
+      },
+      "request_required": {
+        "trigger": false,
+        "final_label": "other",
+        "comparison": "unchanged"
+      }
+    },
+    "req-h03": {
+      "role": "explicit_matching_useful",
+      "initial_label": "other",
+      "seed_label": "schedule",
+      "baseline": {
+        "trigger": true,
+        "final_label": "schedule",
+        "comparison": "improved"
+      },
+      "request_required": {
+        "trigger": true,
+        "final_label": "schedule",
+        "comparison": "improved"
+      }
+    },
+    "req-h04": {
+      "role": "explicit_request_mismatch",
+      "initial_label": "materials",
+      "seed_label": null,
+      "baseline": {
+        "trigger": false,
+        "final_label": "materials",
+        "comparison": "unchanged"
+      },
+      "request_required": {
+        "trigger": false,
+        "final_label": "materials",
+        "comparison": "unchanged"
+      }
+    },
+    "req-h05": {
+      "role": "conflicting_verified_history",
+      "initial_label": "schedule",
+      "seed_label": null,
+      "baseline": {
+        "trigger": false,
+        "final_label": "schedule",
+        "comparison": "unchanged"
+      },
+      "request_required": {
+        "trigger": false,
+        "final_label": "schedule",
+        "comparison": "unchanged"
+      }
+    },
+    "req-h06": {
+      "role": "explicit_marker_still_coarse",
+      "initial_label": "materials",
+      "seed_label": "account",
+      "baseline": {
+        "trigger": true,
+        "final_label": "account",
+        "comparison": "degraded"
+      },
+      "request_required": {
+        "trigger": true,
+        "final_label": "account",
+        "comparison": "degraded"
+      }
+    },
+    "req-h07": {
+      "role": "no_seed_for_topic",
+      "initial_label": "other",
+      "seed_label": null,
+      "baseline": {
+        "trigger": false,
+        "final_label": "other",
+        "comparison": "unchanged"
+      },
+      "request_required": {
+        "trigger": false,
+        "final_label": "other",
+        "comparison": "unchanged"
+      }
+    }
+  }
+}

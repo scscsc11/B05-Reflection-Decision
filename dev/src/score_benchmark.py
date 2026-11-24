@@ -37,8 +37,7 @@ def index_cases(run: dict, stage: str, *, guarded: bool = False) -> dict[str, di
             raise ValueError("Case IDs must be nonempty and unique.")
         if row.get("label") not in run["labels"]:
             raise ValueError(f"{case_id!r}: label outside the benchmark categories.")
-        if row.get("correct") is not None or row.get("expected_label") is not None:
-            raise ValueError(f"{case_id!r}: run contains an in-process score or reference label.")
+        reflection.validate_blind_decision(row, case_id)
         if stage == "initial":
             reflection.required_text(row.get("reason"), f"{case_id!r} initial reason")
         gate = row.get("review_gate") if guarded else None
@@ -53,6 +52,7 @@ def index_cases(run: dict, stage: str, *, guarded: bool = False) -> dict[str, di
 
 def check_guard(
     case_id: str, row: dict, draft: dict, history: list[dict], context_policy: str | None = None,
+    *, require_request_feature: bool = False,
 ) -> None:
     gate = row.get("review_gate")
     if not isinstance(gate, dict):
@@ -75,6 +75,10 @@ def check_guard(
             not evidence or set(evidence) != {item["case_id"] for item in topic_evidence}
         ):
             raise ValueError(f"{case_id!r}: review did not use the evidence that authorized it.")
+        if require_request_feature and any(
+            not reflection.has_unique_request_feature(lesson.get("conditions")) for lesson in topic_evidence
+        ):
+            raise ValueError(f"{case_id!r}: guard evidence must have exactly one request feature.")
     if action in ("skipped", "kept_initial"):
         if row["label"] == draft["label"] and row.get("selected_round") == 0:
             return
@@ -109,18 +113,27 @@ def score(
         or with_history["review_round_limit"] < 1
     ):
         raise ValueError("Both review arms must share the same round limit and time budget.")
+    protocol = with_history.get("blind_review_policy")
+    if without_history.get("blind_review_policy") != protocol:
+        raise ValueError("Both review arms must use the same blind review protocol.")
 
     arms = {"initial": initial_cases}
     comparisons = [
         ("review_without_history", without_history, False, False),
         ("review_with_history", with_history, True, False),
     ]
+    match_policy = guarded.get("guard_match_policy") if guarded is not None else None
     if guarded is not None:
+        if match_policy is not None and (
+            match_policy != reflection.GUARD_REQUEST_POLICY
+            or guarded.get("guard_context_policy") != reflection.GUARD_CONTEXT_POLICY
+        ):
+            raise ValueError("Unknown guard match policy or missing guard context policy.")
         if any(guarded.get(field) != with_history.get(field) for field in (
             "review_round_limit", "time_budget_seconds", "knowledge_seed_fingerprint", "knowledge_seed_cases",
-            "retrieval_policy",
+            "retrieval_policy", "blind_review_policy",
         )):
-            raise ValueError("Guarded review must use the same budget and seed as ordinary history review.")
+            raise ValueError("Guarded review must use the same protocol, budget and seed as ordinary history review.")
         comparisons.append(("review_with_guard", guarded, True, True))
 
     for name, run, enabled, is_guarded in comparisons:
@@ -132,8 +145,8 @@ def score(
         if run.get("initial_fingerprint") != digest or run.get("history_enabled") is not enabled:
             raise ValueError("Review arms must reuse the same initial results and have opposite history settings.")
         reviewed = index_cases(run, "review", guarded=is_guarded)
-        if list(reviewed) != list(initial_cases):
-            raise ValueError("Review arms must cover the same cases in the same order.")
+        if reviewed.keys() != initial_cases.keys():
+            raise ValueError("Review arms must cover the same case IDs.")
         seed = run.get("knowledge_seed_cases", [])
         if (
             not isinstance(seed, list) or any(not isinstance(item, str) for item in seed)
@@ -151,7 +164,10 @@ def score(
             ):
                 raise ValueError(f"{case_id!r}: review used knowledge outside the declared seed.")
             if is_guarded:
-                check_guard(case_id, row, draft, history, run.get("guard_context_policy"))
+                check_guard(
+                    case_id, row, draft, history, run.get("guard_context_policy"),
+                    require_request_feature=match_policy == reflection.GUARD_REQUEST_POLICY,
+                )
         arms[name] = reviewed
 
     baseline = {case_id: row["label"] == answers[case_id] for case_id, row in initial_cases.items()}
@@ -161,7 +177,8 @@ def score(
         measures = {"correct": 0, "cases": len(rows), "model_calls": 0, "model_seconds": 0.0}
         if name != "initial":
             measures.update(improved=0, unchanged=0, degraded=0)
-        for case_id, row in rows.items():
+        for case_id in baseline:
+            row = rows[case_id]
             correct = row["label"] == answers[case_id]
             measures["correct"] += correct
             measures["model_calls"] += len(row["calls"])
@@ -177,13 +194,19 @@ def score(
                 if "review_gate" in row:
                     detail["review_gate"] = row["review_gate"]
             cases[case_id][name] = detail
+        measures["accuracy"] = measures["correct"] / measures["cases"]
         counts[name] = measures
-    return {
+    result = {
         "task": reflection.TASK, "domain": initial["domain"],
         "gateway": initial["gateway"], "model": initial["model"],
         "blind": True, "benchmark_fingerprint": initial["benchmark_fingerprint"],
         "initial_fingerprint": digest, "counts": counts, "cases": cases,
     }
+    if protocol is not None:
+        result["blind_review_policy"] = protocol
+    if match_policy is not None:
+        result["guard_match_policy"] = match_policy
+    return result
 
 
 def main(argv=None) -> int:
@@ -193,16 +216,18 @@ def main(argv=None) -> int:
     parser.add_argument("--with-history", type=Path, required=True)
     parser.add_argument("--guarded", type=Path, help="additional blind review with the verified-history guard")
     parser.add_argument("--answers", type=Path, required=True)
+    parser.add_argument("--answers-sha256", help="expected SHA-256 of the frozen reference file")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
-        result = score(
-            read_arm(args.initial, "norethink"),
-            read_arm(args.without_history, "rethink"),
-            read_arm(args.with_history, "rethink"),
-            scene_io.read_json(args.answers),
-            guarded=read_arm(args.guarded, "rethink") if args.guarded is not None else None,
-        )
+        initial = read_arm(args.initial, "norethink")
+        without_history = read_arm(args.without_history, "rethink")
+        with_history = read_arm(args.with_history, "rethink")
+        guarded = read_arm(args.guarded, "rethink") if args.guarded is not None else None
+        answers = scene_io.read_json(args.answers, expected_sha256=args.answers_sha256)
+        result = score(initial, without_history, with_history, answers, guarded=guarded)
+        if args.answers_sha256 is not None:
+            result["reference_sha256"] = args.answers_sha256
         text = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         if args.output is not None:
             with args.output.open("x", encoding="utf-8") as stream:

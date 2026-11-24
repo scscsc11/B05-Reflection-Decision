@@ -1,0 +1,12 @@
+{
+  "source": "Synthetic civilian campus tickets, offline label map separate",
+  "review_rounds": 2,
+  "time_budget_seconds": 180.0,
+  "sha256": {
+    "seed_input/benchmark.json": "54f040e5b89fb4c7d7546ef65e0a41426cf52e71e708e6264870fbc244513940",
+    "seed_input/answers.json": "53656254f5734fd30ed88801cf99c24c6930d9e39138e3c14be4838f251c8551",
+    "heldout_input/benchmark.json": "35612f1123e3b8b1310bd2db6d4a7896be0656e4d7d44576cfac750ab9b27161",
+    "offline/answers.json": "1d87f94bb7e4da64b466589e4676eb64e75b1de452079faaeac239ee08108175",
+    "offline/scenarios.json": "034033b19e034a45dfc7f02381992cd01c5949ff3790f9a6dcc04cfa2bf4bf64"
+  }
+}

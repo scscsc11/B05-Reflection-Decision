@@ -90,6 +90,10 @@ def main(argv=None, *, processor: Processor | None = None) -> int:
     benchmark.add_argument("--blind", action="store_true", help="run without reference answers or knowledge writes")
     benchmark.add_argument("--initial-results", type=Path, help="reuse the blind initial-only results in review")
     benchmark.add_argument("--guard-review", action="store_true", help="require matching verified history for blind changes")
+    benchmark.add_argument(
+        "--guard-require-request-feature", action="store_true",
+        help="also require a single request: feature in the guarded match",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
         "--fixture", dest="mode", action="store_const", const="fixture",
@@ -107,6 +111,8 @@ def main(argv=None, *, processor: Processor | None = None) -> int:
     logger.info("Run started: mode=%s task=%s test=%s.", args.mode, args.task, args.test)
     try:
         data_root = Path(os.environ.get("DATA_ROOT", "/input"))
+        if args.guard_require_request_feature and not args.guard_review:
+            raise ValueError("--guard-require-request-feature requires --guard-review.")
         if args.guard_review and args.task != reflection.TASK:
             raise ValueError("--guard-review is for the support-ticket benchmark.")
         if args.task == reflection.TASK:
@@ -117,7 +123,7 @@ def main(argv=None, *, processor: Processor | None = None) -> int:
                 review_rounds=args.review_rounds, use_history=not args.no_history,
                 simulated=args.simulated_gateway, time_budget=args.time_budget,
                 checkpoint=args.checkpoint, blind=args.blind, initial_results=args.initial_results,
-                guard_review=args.guard_review,
+                guard_review=args.guard_review, require_request_feature=args.guard_require_request_feature,
             )
             status = 0
             return status
