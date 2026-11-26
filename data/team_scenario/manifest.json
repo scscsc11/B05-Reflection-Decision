@@ -1,0 +1,180 @@
+{
+  "_comment": "场景材料清单（马子越整理）。舒超确认的冻结数据 = 两个实验包的输入/答案文件。所有 path 相对仓库根目录；运行检查脚本时用 --root .。SHA-256 差异见 docs/scenario/SCENARIO_PACKAGE_CHECK.md 差异清单，交舒超核对，不自行改数据。",
+  "report_refs": [
+    "docs/scenario/SCENARIO_DESIGN.md",
+    "docs/experiments/support_tickets_v1/README.md",
+    "docs/experiments/request_guard_v1/README.md"
+  ],
+  "entries": [
+    {
+      "path": "docs/experiments/support_tickets_v1/seed_input/benchmark.json",
+      "purpose": "民用工单种子输入（8 例），用于构建知识种子",
+      "report_section": "第3章 数据划分 / 第5章 实验设置",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "required_fields": [
+          "domain",
+          "labels",
+          "cases",
+          "cases.0.id",
+          "cases.0.topic",
+          "cases.0.text"
+        ],
+        "field_types": {
+          "domain": "string",
+          "labels": "object",
+          "cases": "array",
+          "cases.0.features": "array"
+        },
+        "finite_numbers": true
+      }
+    },
+    {
+      "path": "docs/experiments/support_tickets_v1/seed_input/answers.json",
+      "purpose": "种子案例编号到类别的映射（8 条）",
+      "report_section": "第3章 数据划分",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "required_fields": [
+          "r2-1b871f313273"
+        ],
+        "finite_numbers": true
+      }
+    },
+    {
+      "path": "docs/experiments/support_tickets_v1/heldout_input/benchmark.json",
+      "purpose": "民用工单留出输入（24 例，四类各 6）",
+      "report_section": "第3章 数据划分 / 第5章 实验设置",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "required_fields": [
+          "domain",
+          "labels",
+          "cases"
+        ],
+        "field_types": {
+          "domain": "string",
+          "labels": "object",
+          "cases": "array"
+        },
+        "finite_numbers": true
+      }
+    },
+    {
+      "path": "docs/experiments/support_tickets_v1/offline/answers.json",
+      "purpose": "留出案例参考标签（24 条），离线评分只读",
+      "report_section": "第5章 离线评分",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "required_fields": [
+          "r2-13e86ddef3c2"
+        ],
+        "finite_numbers": true
+      }
+    },
+    {
+      "path": "docs/experiments/support_tickets_v1/offline/label_rationales.json",
+      "purpose": "留出案例标签依据，供资料复核",
+      "report_section": "第3章 标签依据",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "finite_numbers": true
+      }
+    },
+    {
+      "path": "docs/experiments/request_guard_v1/seed_input/benchmark.json",
+      "purpose": "主诉对照种子输入（5 例）",
+      "report_section": "第5章 条件复核对照",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "required_fields": [
+          "domain",
+          "labels",
+          "cases",
+          "cases.0.id",
+          "cases.0.topic",
+          "cases.0.text"
+        ],
+        "field_types": {
+          "domain": "string",
+          "labels": "object",
+          "cases": "array",
+          "cases.0.features": "array"
+        },
+        "finite_numbers": true
+      }
+    },
+    {
+      "path": "docs/experiments/request_guard_v1/seed_input/answers.json",
+      "purpose": "主诉对照种子标签（5 条）",
+      "report_section": "第5章 条件复核对照",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "required_fields": [
+          "req-s01"
+        ],
+        "finite_numbers": true
+      }
+    },
+    {
+      "path": "docs/experiments/request_guard_v1/heldout_input/benchmark.json",
+      "purpose": "主诉对照留出输入（7 例）",
+      "report_section": "第5章 条件复核对照",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "required_fields": [
+          "domain",
+          "labels",
+          "cases"
+        ],
+        "field_types": {
+          "domain": "string",
+          "labels": "object",
+          "cases": "array"
+        },
+        "finite_numbers": true
+      }
+    },
+    {
+      "path": "docs/experiments/request_guard_v1/offline/answers.json",
+      "purpose": "主诉对照留出参考答案（7 条）",
+      "report_section": "第5章 条件复核对照",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "required_fields": [
+          "req-h01"
+        ],
+        "finite_numbers": true
+      }
+    },
+    {
+      "path": "docs/experiments/request_guard_v1/offline/scenarios.json",
+      "purpose": "主诉对照参考场景，供条件复核读取",
+      "report_section": "第5章 条件复核对照",
+      "version_date": "2026-11-23",
+      "status": "已确认",
+      "checks": {
+        "json": true,
+        "finite_numbers": true
+      }
+    }
+  ]
+}

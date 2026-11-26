@@ -1,0 +1,65 @@
+{
+  "generated_at": "2026-11-26 20:06:02",
+  "scan_paths": [
+    "tmp",
+    "docs/experiments",
+    "data"
+  ],
+  "evidence_type_legend": [
+    {
+      "key": "official_io",
+      "label": "官方 IO 校验"
+    },
+    {
+      "key": "fixed_fixture",
+      "label": "固定值夹具"
+    },
+    {
+      "key": "scripted_gateway",
+      "label": "脚本化网关"
+    },
+    {
+      "key": "in_process_stub",
+      "label": "进程内替身"
+    },
+    {
+      "key": "real_model",
+      "label": "真实模型调用"
+    },
+    {
+      "key": "official_eval",
+      "label": "官方正式评测"
+    }
+  ],
+  "total_records": 0,
+  "counts_by_type": {
+    "official_io": 0,
+    "fixed_fixture": 0,
+    "scripted_gateway": 0,
+    "in_process_stub": 0,
+    "real_model": 0,
+    "official_eval": 0
+  },
+  "unclassified_count": 0,
+  "records": [],
+  "note": "各项为只读汇总；无证据来源的实验类型 counts 为 0，表示未开展。",
+  "skipped_input_files": [
+    "docs/experiments/request_guard_v1/manifest.json",
+    "docs/experiments/request_guard_v1/heldout_input/benchmark.json",
+    "docs/experiments/request_guard_v1/offline/answers.json",
+    "docs/experiments/request_guard_v1/offline/scenarios.json",
+    "docs/experiments/request_guard_v1/seed_input/answers.json",
+    "docs/experiments/request_guard_v1/seed_input/benchmark.json",
+    "docs/experiments/support_tickets_v1/manifest.json",
+    "docs/experiments/support_tickets_v1/heldout_input/benchmark.json",
+    "docs/experiments/support_tickets_v1/offline/answers.json",
+    "docs/experiments/support_tickets_v1/offline/label_audit.json",
+    "docs/experiments/support_tickets_v1/offline/label_rationales.json",
+    "docs/experiments/support_tickets_v1/seed_input/answers.json",
+    "docs/experiments/support_tickets_v1/seed_input/benchmark.json",
+    "data/support_tickets/answers.json",
+    "data/support_tickets/benchmark.json",
+    "data/team_scenario/manifest.json"
+  ],
+  "skipped_input_count": 16
+}
